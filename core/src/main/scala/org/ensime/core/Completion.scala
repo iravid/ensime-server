@@ -40,9 +40,9 @@
 package org.ensime.core
 
 import scala.collection.mutable
-import scala.concurrent.{Await, Future}
+import scala.concurrent.{ Await, Future }
 import scala.concurrent.duration._
-import scala.reflect.internal.util.{BatchSourceFile, SourceFile}
+import scala.reflect.internal.util.{ BatchSourceFile, SourceFile }
 import akka.actor.ActorRef
 import akka.pattern.Patterns
 import akka.util.Timeout
@@ -279,7 +279,6 @@ trait CompletionControl {
         logger.error("Failure while querying Indexer for search result types", e)
         None
     }
-
 
     def keywordCompletions(prefix: String): Seq[CompletionInfo] = {
       if (prefix.length > 0) {

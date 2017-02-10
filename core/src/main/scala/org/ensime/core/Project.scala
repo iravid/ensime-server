@@ -157,6 +157,16 @@ class Project(
       sender() ! ConnectionInfo()
   }
 
+  override val supervisorStrategy = OneForOneStrategy() {
+    case e if sender() == indexer =>
+      log.error("Indexer threw an error. Restarting it", e)
+      SupervisorStrategy.Restart
+
+    case otherwise =>
+      log.error(s"${sender()} threw an error. Escalating", otherwise)
+      SupervisorStrategy.Escalate
+  }
+
 }
 
 object Project {
