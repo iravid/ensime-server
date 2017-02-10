@@ -40,10 +40,9 @@
 package org.ensime.core
 
 import scala.collection.mutable
-import scala.concurrent.{ Await, Future }
+import scala.concurrent.{Await, Future}
 import scala.concurrent.duration._
-import scala.reflect.internal.util.{ BatchSourceFile, SourceFile }
-
+import scala.reflect.internal.util.{BatchSourceFile, SourceFile}
 import akka.actor.ActorRef
 import akka.pattern.Patterns
 import akka.util.Timeout
@@ -51,6 +50,8 @@ import org.ensime.api._
 import org.ensime.indexer.PackageName
 import org.ensime.indexer.lucene.SimpleLucene
 import org.ensime.util.Timing.dilation
+
+import scala.util.control.NonFatal
 
 trait CompletionControl {
   self: RichPresentationCompiler =>
@@ -271,7 +272,14 @@ trait CompletionControl {
       }
     }
 
-    val typeSearchResults = typeSearch.flatMap(Await.result(_, Duration.Inf))
+    val typeSearchResults = try {
+      typeSearch.flatMap(Await.result(_, 5.seconds))
+    } catch {
+      case NonFatal(e) =>
+        logger.error("Failure while querying Indexer for search result types", e)
+        None
+    }
+
 
     def keywordCompletions(prefix: String): Seq[CompletionInfo] = {
       if (prefix.length > 0) {
@@ -375,20 +383,17 @@ object CompletionUtil {
   }
 
   def fetchTypeSearchCompletions(prefix: String, maxResults: Int, indexer: ActorRef): Future[Option[List[CompletionInfo]]] = {
-    val req = TypeCompletionsReq(prefix, maxResults)
+    import akka.pattern.ask
     import scala.concurrent.ExecutionContext.Implicits.{ global => exe }
-    val askRes = Patterns.ask(indexer, req, Timeout((1 * dilation).seconds))
-    askRes.map {
-      case s: SymbolSearchResults =>
-        s.syms.map { s =>
-          CompletionInfo(
-            None,
-            s.localName, 40, None
-          )
-        }
-      case unknown =>
-        throw new IllegalStateException("Unexpected response type from request:" + unknown)
-    }.map(Some(_)).recover { case _ => None }
+
+    implicit val timeout = Timeout((1 * dilation).seconds)
+
+    indexer.ask(TypeCompletionsReq(prefix, maxResults))
+      .mapTo[SymbolSearchResults]
+      .map { searchResults =>
+        Some(searchResults.syms.map(s => CompletionInfo(None, s.localName, 40, None)))
+      }
+      .recover { case _ => None }
   }
 
 }
