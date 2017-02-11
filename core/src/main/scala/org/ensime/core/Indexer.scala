@@ -4,7 +4,7 @@ package org.ensime.core
 
 import akka.actor._
 import akka.event.LoggingReceive
-import akka.pattern.pipe
+import akka.pattern.{ after, pipe }
 import org.ensime.api._
 import org.ensime.indexer.SearchService
 import org.ensime.indexer.database.DatabaseService.FqnSymbol
@@ -12,6 +12,7 @@ import org.ensime.model._
 import org.ensime.vfs._
 
 import scala.concurrent.Future
+import scala.concurrent.duration._
 
 // only used for queries by other components
 final case class TypeCompletionsReq(prefix: String, maxResults: Int)
@@ -23,6 +24,8 @@ class Indexer(
 ) extends Actor with ActorLogging {
 
   import context.dispatcher
+
+  def timeoutResponse = Future.failed(new java.util.concurrent.TimeoutException("Search timed out"))
 
   private def typeResult(hit: FqnSymbol) = TypeSearchResult(
     hit.fqn, hit.fqn.split("\\.").last, hit.declAs,
@@ -56,14 +59,19 @@ class Indexer(
         .map(ImportSuggestions)
 
       suggestions pipeTo sender()
+      after(5.seconds, context.system.scheduler)(timeoutResponse) pipeTo sender()
 
     case PublicSymbolSearchReq(keywords, maxResults) =>
       val suggestions = oldSearchSymbols(keywords, maxResults).map(SymbolSearchResults)
+
       suggestions pipeTo sender()
+      after(5.seconds, context.system.scheduler)(timeoutResponse) pipeTo sender()
 
     case TypeCompletionsReq(query: String, maxResults: Int) =>
       val completions = oldSearchTypes(query, maxResults).map(SymbolSearchResults)
+
       completions pipeTo sender()
+      after(5.seconds, context.system.scheduler)(timeoutResponse) pipeTo sender()
   }
 }
 object Indexer {

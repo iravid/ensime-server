@@ -49,10 +49,26 @@ class Project(
   private val sourceWatcher = new SourceWatcher(config, resolver :: Nil)
   private val reTypecheck = new FileChangeListener {
     def reTypeCheck(): Unit = self ! AskReTypecheck
-    def fileAdded(f: FileObject): Unit = reTypeCheck()
-    def fileChanged(f: FileObject): Unit = reTypeCheck()
-    def fileRemoved(f: FileObject): Unit = reTypeCheck()
-    override def baseReCreated(f: FileObject): Unit = reTypeCheck()
+
+    def fileAdded(f: FileObject): Unit = {
+      log.debug("Asking for re-typecheck due to {} being added", f.getName.getFriendlyURI)
+      reTypeCheck()
+    }
+
+    def fileChanged(f: FileObject): Unit = {
+      log.debug("Asking for re-typecheck due to {} being changed", f.getName.getFriendlyURI)
+      reTypeCheck()
+    }
+
+    def fileRemoved(f: FileObject): Unit = {
+      log.debug("Asking for re-typecheck due to {} being removed", f.getName.getFriendlyURI)
+      reTypeCheck()
+    }
+
+    override def baseReCreated(f: FileObject): Unit = {
+      log.debug("Asking for re-typecheck due to {} being re-created", f.getName.getFriendlyURI)
+      reTypeCheck()
+    }
   }
   private val classfileWatcher = context.actorOf(Props(new ClassfileWatcher(config, searchService :: reTypecheck :: Nil)), "classFileWatcher")
 
