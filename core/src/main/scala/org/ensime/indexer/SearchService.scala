@@ -239,19 +239,21 @@ class SearchService(
   }.filterNot(sym => ignore.exists(sym.fqn.contains))
 
   /** free-form search for classes */
-  def searchClasses(query: String, max: Int): List[FqnSymbol] = {
-    val fqns = index.searchClasses(query, max)
-    Await.result(db.find(fqns), QUERY_TIMEOUT) take max
-  }
+  def searchClasses(query: String, max: Int): Future[List[FqnSymbol]] =
+    for {
+      fqns <- Future(blocking(index.searchClasses(query, max)))
+      fqnSyms <- db.find(fqns)
+    } yield fqnSyms take max
 
   /** free-form search for classes and methods */
-  def searchClassesMethods(terms: List[String], max: Int): List[FqnSymbol] = {
-    val fqns = index.searchClassesMethods(terms, max)
-    Await.result(db.find(fqns), QUERY_TIMEOUT) take max
-  }
+  def searchClassesMethods(terms: List[String], max: Int): Future[List[FqnSymbol]] =
+    for {
+      fqns <- Future(blocking(index.searchClassesMethods(terms, max)))
+      fqnSyms <- db.find(fqns)
+    } yield fqnSyms take max
 
   /** only for exact fqns */
-  def findUnique(fqn: String): Option[FqnSymbol] = Await.result(db.find(fqn), QUERY_TIMEOUT)
+  def findUnique(fqn: String): Future[Option[FqnSymbol]] = db.find(fqn)
 
   /* DELETE then INSERT in H2 is ridiculously slow, so we put all modifications
    * into a blocking queue and dedicate a thread to block on draining the queue.

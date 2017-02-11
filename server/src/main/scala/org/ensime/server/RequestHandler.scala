@@ -45,6 +45,10 @@ class RequestHandler(
       server forward RpcResponseEnvelope(Some(envelope.callId), err)
       context stop self
 
+    case Status.Failure(e) =>
+      server forward RpcResponseEnvelope(Some(envelope.callId), EnsimeServerError(e.getMessage))
+      context stop self
+
     case response: RpcResponse =>
       server forward RpcResponseEnvelope(Some(envelope.callId), response)
       context stop self

@@ -159,11 +159,11 @@ class Project(
 
   override val supervisorStrategy = OneForOneStrategy() {
     case e if sender() == indexer =>
-      log.error("Indexer threw an error. Restarting it", e)
+      log.error(e, "Indexer threw an error. Restarting it")
       SupervisorStrategy.Restart
 
     case otherwise =>
-      log.error(s"${sender()} threw an error. Escalating", otherwise)
+      log.error(otherwise, s"${sender()} threw an error. Escalating")
       SupervisorStrategy.Escalate
   }
 

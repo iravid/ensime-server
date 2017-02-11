@@ -12,6 +12,9 @@ import org.ensime.indexer.database.DatabaseService._
 import org.ensime.vfs._
 import org.ensime.util.ensimefile._
 
+import scala.concurrent.Await
+import scala.concurrent.duration._
+
 trait ModelBuilders {
   self: RichPresentationCompiler with FqnToSymbol =>
 
@@ -40,7 +43,7 @@ trait ModelBuilders {
         val fqn = toFqn(sym).fqnString
         logger.debug(s"$sym ==> $fqn")
 
-        val hit = search.findUnique(fqn)
+        val hit = Await.result(search.findUnique(fqn), 5.seconds)
         logger.debug(s"search: $fqn = $hit")
         hit.flatMap(LineSourcePositionHelper.fromFqnSymbol(_)(config, vfs)).flatMap { sourcePos =>
           if (sourcePos.file.isScala)

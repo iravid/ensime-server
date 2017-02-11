@@ -4,11 +4,14 @@ package org.ensime.core
 
 import akka.actor._
 import akka.event.LoggingReceive
+import akka.pattern.pipe
 import org.ensime.api._
 import org.ensime.indexer.SearchService
 import org.ensime.indexer.database.DatabaseService.FqnSymbol
 import org.ensime.model._
 import org.ensime.vfs._
+
+import scala.concurrent.Future
 
 // only used for queries by other components
 final case class TypeCompletionsReq(prefix: String, maxResults: Int)
@@ -19,18 +22,24 @@ class Indexer(
     implicit val vfs: EnsimeVFS
 ) extends Actor with ActorLogging {
 
+  import context.dispatcher
+
   private def typeResult(hit: FqnSymbol) = TypeSearchResult(
     hit.fqn, hit.fqn.split("\\.").last, hit.declAs,
     LineSourcePositionHelper.fromFqnSymbol(hit)(config, vfs)
   )
 
-  def oldSearchTypes(query: String, max: Int) =
-    index.searchClasses(query, max).filterNot {
-      name => name.fqn.endsWith("$") || name.fqn.endsWith("$class")
-    }.map(typeResult)
+  def oldSearchTypes(query: String, max: Int): Future[List[TypeSearchResult]] =
+    for {
+      searchResult <- index.searchClasses(query, max)
+      filtered = searchResult.filterNot {
+        name => name.fqn.endsWith("$") || name.fqn.endsWith("$class")
+      }
+      typed = filtered map typeResult
+    } yield typed
 
-  def oldSearchSymbols(terms: List[String], max: Int) =
-    index.searchClassesMethods(terms, max).flatMap {
+  def oldSearchSymbols(terms: List[String], max: Int): Future[List[SymbolSearchResult]] =
+    index.searchClassesMethods(terms, max).map(_.flatMap {
       case hit if hit.declAs == DeclaredAs.Class => Some(typeResult(hit))
       case hit if hit.declAs == DeclaredAs.Method => Some(MethodSearchResult(
         hit.fqn, hit.fqn.split("\\.").last, hit.declAs,
@@ -38,20 +47,23 @@ class Indexer(
         hit.fqn.split("\\.").init.mkString(".")
       ))
       case _ => None // were never supported
-    }
+    })
 
   override def receive = LoggingReceive {
     case ImportSuggestionsReq(file, point, names, maxResults) =>
-      val suggestions = names.map(oldSearchTypes(_, maxResults))
-      sender ! ImportSuggestions(suggestions)
+      val suggestions = Future
+        .traverse(names)(oldSearchTypes(_, maxResults))
+        .map(ImportSuggestions)
+
+      suggestions pipeTo sender()
 
     case PublicSymbolSearchReq(keywords, maxResults) =>
-      val suggestions = oldSearchSymbols(keywords, maxResults)
-      sender ! SymbolSearchResults(suggestions)
+      val suggestions = oldSearchSymbols(keywords, maxResults).map(SymbolSearchResults)
+      suggestions pipeTo sender()
 
     case TypeCompletionsReq(query: String, maxResults: Int) =>
-      sender ! SymbolSearchResults(oldSearchTypes(query, maxResults))
-
+      val completions = oldSearchTypes(query, maxResults).map(SymbolSearchResults)
+      completions pipeTo sender()
   }
 }
 object Indexer {
