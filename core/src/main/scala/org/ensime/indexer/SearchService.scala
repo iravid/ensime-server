@@ -34,6 +34,7 @@ class SearchService(
     actorSystem: ActorSystem,
     vfs: EnsimeVFS
 ) extends FileChangeListener with SLF4JLogging {
+  import ExecutionContext.Implicits.global
 
   private[indexer] def isUserFile(file: FileName): Boolean = {
     (config.allTargets map (vfs.vfile)) exists (file isAncestor _.getName)
@@ -68,8 +69,6 @@ class SearchService(
 
   private[indexer] val index = new IndexService((config.cacheDir / ("index-" + version)).toPath)
   private val db = new DatabaseService(config.cacheDir / ("sql-" + version))
-
-  import ExecutionContext.Implicits.global
 
   // each jar / directory must acquire a permit, released when the
   // data is persisted. This is to keep the heap usage down and is a
@@ -149,7 +148,7 @@ class SearchService(
 
     def commitIndex(): Future[Unit] = {
       log.debug("committing index to disk...")
-      val i = Future { blocking { index.commit() } }
+      val i = index.commit()
       val g = db.commit()
       for {
         _ <- i
@@ -173,9 +172,13 @@ class SearchService(
   def refreshResolver(): Unit = resolver.update()
 
   def persist(check: FileCheck, symbols: List[FqnSymbol], commitIndex: Boolean, boost: Boolean): Future[Int] = {
-    val iwork = Future { blocking { index.persist(check, symbols, commitIndex, boost) } }
+    val iwork = index.persist(check, symbols, commitIndex, boost)
     val dwork = db.persist(check, symbols)
-    iwork.flatMap { _ => dwork }
+
+    for {
+      _ <- iwork
+      inserts <- dwork
+    } yield inserts
   }
 
   // this method leak semaphore on every call, which must be released
@@ -240,13 +243,13 @@ class SearchService(
 
   /** free-form search for classes */
   def searchClasses(query: String, max: Int): List[FqnSymbol] = {
-    val fqns = index.searchClasses(query, max)
+    val fqns = Await.result(index.searchClasses(query, max), QUERY_TIMEOUT)
     Await.result(db.find(fqns), QUERY_TIMEOUT) take max
   }
 
   /** free-form search for classes and methods */
   def searchClassesMethods(terms: List[String], max: Int): List[FqnSymbol] = {
-    val fqns = index.searchClassesMethods(terms, max)
+    val fqns = Await.result(index.searchClassesMethods(terms, max), QUERY_TIMEOUT)
     Await.result(db.find(fqns), QUERY_TIMEOUT) take max
   }
 
@@ -277,18 +280,22 @@ class SearchService(
   def delete(files: List[FileObject]): Future[Int] = {
     // this doesn't speed up Lucene deletes, but it means that we
     // don't wait for Lucene before starting the H2 deletions.
-    val iwork = Future { blocking { index.remove(files) } }
+    val iwork = index.remove(files)
     val dwork = db.removeFiles(files)
-    iwork.flatMap(_ => dwork)
+
+    for {
+      _ <- iwork
+      removals <- dwork
+    } yield removals
   }
 
   def fileChanged(f: FileObject): Unit = backlogActor ! IndexFile(f)
   def fileRemoved(f: FileObject): Unit = fileChanged(f)
   def fileAdded(f: FileObject): Unit = fileChanged(f)
 
-  def shutdown(): Future[Unit] = {
-    db.shutdown()
-  }
+  def shutdown(): Future[Unit] = Future.sequence {
+    List(db.shutdown(), index.shutdown())
+  } map (_ => ())
 }
 
 final case class IndexFile(f: FileObject)
