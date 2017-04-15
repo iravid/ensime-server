@@ -58,6 +58,9 @@ class RichPresentationCompilerSpec extends EnsimeSpec
 
   val original = EnsimeConfigFixture.EmptyTestProject
 
+  // Completion requests need an ExecutionContext
+  import scala.concurrent.ExecutionContext.Implicits.global
+
   "RichPresentationCompiler" should "get symbol info with cursor immediately after and before symbol" in {
     withPresCompiler { (config, cc) =>
       import ReallyRichPresentationCompilerFixture._
@@ -174,7 +177,7 @@ class RichPresentationCompilerSpec extends EnsimeSpec
         "}") { (p, label, cc) =>
 
           val outsidePosition = new OffsetPosition(p.source, 1000)
-          val completions = cc.completionsAt(outsidePosition, 100, false)
+          val completions = cc.completionsAt(outsidePosition, 100, false).futureValue
           completions.completions.size shouldBe 0
         }
     }
@@ -185,7 +188,7 @@ class RichPresentationCompilerSpec extends EnsimeSpec
     "object A { def aMethod(a: Int) = a }",
     "object B { val x = A.@@ "
   ) { (p, cc) =>
-      val result = cc.completionsAt(p, 10, caseSens = false)
+      val result = cc.completionsAt(p, 10, caseSens = false).futureValue
       forAtLeast(1, result.completions) { x =>
         x.name shouldBe "aMethod"
         x.isInfix shouldBe false
@@ -196,7 +199,7 @@ class RichPresentationCompilerSpec extends EnsimeSpec
     "package com.example",
     "object Ab@@c {}"
   ) { (p, cc) =>
-      val result = cc.completionsAt(p, 10, caseSens = false)
+      val result = cc.completionsAt(p, 10, caseSens = false).futureValue
       forAll(result.completions) { _.name should not be "Abc" }
     }
 
@@ -205,7 +208,7 @@ class RichPresentationCompilerSpec extends EnsimeSpec
     "object A { def aMethod(a: Int) = a }",
     "object B { val x = A.aMeth@@ }"
   ) { (p, cc) =>
-      val result = cc.completionsAt(p, 10, caseSens = false)
+      val result = cc.completionsAt(p, 10, caseSens = false).futureValue
       forAtLeast(1, result.completions) { _.name shouldBe "aMethod" }
     }
 
@@ -214,7 +217,7 @@ class RichPresentationCompilerSpec extends EnsimeSpec
     "object Abc { def aMethod(a: Int) = a }",
     "object B { val x = Ab@@ }"
   ) { (p, cc) =>
-      val result = cc.completionsAt(p, 10, caseSens = false)
+      val result = cc.completionsAt(p, 10, caseSens = false).futureValue
       forAtLeast(1, result.completions) { _.name shouldBe "Abc" }
     }
 
@@ -223,7 +226,7 @@ class RichPresentationCompilerSpec extends EnsimeSpec
     "object Abc { def or2(a: Int) = a }",
     "object B { val x = Abc; x.@@ }"
   ) { (p, cc) =>
-      val result = cc.completionsAt(p, 10, caseSens = false)
+      val result = cc.completionsAt(p, 10, caseSens = false).futureValue
       forAtLeast(1, result.completions) { x =>
         x.name shouldBe "or2"
         x.isInfix shouldBe true
@@ -235,7 +238,7 @@ class RichPresentationCompilerSpec extends EnsimeSpec
     "object Abc { def <+-+>(a: Int) = a }",
     "object B { val x = Abc; x.@@ }"
   ) { (p, cc) =>
-      val result = cc.completionsAt(p, 10, caseSens = false)
+      val result = cc.completionsAt(p, 10, caseSens = false).futureValue
       forAtLeast(1, result.completions) { x =>
         x.name shouldBe "<+-+>"
         x.isInfix shouldBe true
@@ -246,7 +249,7 @@ class RichPresentationCompilerSpec extends EnsimeSpec
     "package com.example",
     "object Abc { val a = List().@@ }"
   ) { (p, cc) =>
-      val result = cc.completionsAt(p, 100, caseSens = false)
+      val result = cc.completionsAt(p, 100, caseSens = false).futureValue
       forAll(result.completions) { x =>
         if (x.name == "++:") x.isInfix shouldBe true
       }
@@ -257,7 +260,7 @@ class RichPresentationCompilerSpec extends EnsimeSpec
     "object Abc { def ~>(a: Int)(b: Int) = a }",
     "object B { val x = Abc; x.@@ }"
   ) { (p, cc) =>
-      val result = cc.completionsAt(p, 10, caseSens = false)
+      val result = cc.completionsAt(p, 10, caseSens = false).futureValue
       forExactly(1, result.completions) { x =>
         x.name shouldBe "~>"
         x.isInfix shouldBe false
@@ -269,7 +272,7 @@ class RichPresentationCompilerSpec extends EnsimeSpec
     "object Abc { def >~>(a: Int, b: Int) = a; def >~>() = 1 }",
     "object B { val x = Abc; x.@@ }"
   ) { (p, cc) =>
-      val result = cc.completionsAt(p, 10, caseSens = false)
+      val result = cc.completionsAt(p, 10, caseSens = false).futureValue
       forExactly(2, result.completions) { x =>
         x.name shouldBe ">~>"
         x.isInfix shouldBe false
@@ -280,7 +283,7 @@ class RichPresentationCompilerSpec extends EnsimeSpec
     "package com.example",
     "object Abc { val a = List().@@ }"
   ) { (p, cc) =>
-      val result = cc.completionsAt(p, 100, caseSens = false)
+      val result = cc.completionsAt(p, 100, caseSens = false).futureValue
       forAll(result.completions) { x =>
         if (x.name == "map") x.isInfix shouldBe false
       }
@@ -291,7 +294,7 @@ class RichPresentationCompilerSpec extends EnsimeSpec
     "object Abc { def ~>(implicit b: Int) = b }",
     "object B { val x = Abc; x.@@ }"
   ) { (p, cc) =>
-      val result = cc.completionsAt(p, 100, caseSens = false)
+      val result = cc.completionsAt(p, 100, caseSens = false).futureValue
       forExactly(1, result.completions) { x =>
         x.name shouldBe "~>"
         x.isInfix shouldBe false
@@ -303,7 +306,7 @@ class RichPresentationCompilerSpec extends EnsimeSpec
     "object Abc { def aMethod(a: Int) = a }",
     "object B { val x = Abc aM@@ }"
   ) { (p, cc) =>
-      val result = cc.completionsAt(p, 10, caseSens = false)
+      val result = cc.completionsAt(p, 10, caseSens = false).futureValue
       forAtLeast(1, result.completions) { _.name shouldBe "aMethod" }
     }
 
@@ -312,7 +315,7 @@ class RichPresentationCompilerSpec extends EnsimeSpec
     "object Abc { def aMethod(a: Int) = a }",
     "object B { val x = Abc @@ }"
   ) { (p, cc) =>
-      val result = cc.completionsAt(p, 10, caseSens = false)
+      val result = cc.completionsAt(p, 10, caseSens = false).futureValue
       forAtLeast(1, result.completions) { _.name shouldBe "aMethod" }
     }
 
@@ -320,7 +323,7 @@ class RichPresentationCompilerSpec extends EnsimeSpec
     "package com.example",
     "object B { val l = Nil; val ll = l +@@ }"
   ) { (p, cc) =>
-      val result = cc.completionsAt(p, 10, caseSens = false)
+      val result = cc.completionsAt(p, 10, caseSens = false).futureValue
       forAtLeast(1, result.completions) { _.name shouldBe "++" }
     }
 
@@ -328,7 +331,7 @@ class RichPresentationCompilerSpec extends EnsimeSpec
     "package com.example",
     "import ja@@"
   ) { (p, cc) =>
-      val result = cc.completionsAt(p, 10, caseSens = false)
+      val result = cc.completionsAt(p, 10, caseSens = false).futureValue
       forAtLeast(1, result.completions) { _.name shouldBe "java" }
     }
 
@@ -336,7 +339,7 @@ class RichPresentationCompilerSpec extends EnsimeSpec
     "package com.example",
     "import java.ut@@"
   ) { (p, cc) =>
-      val result = cc.completionsAt(p, 10, caseSens = false)
+      val result = cc.completionsAt(p, 10, caseSens = false).futureValue
       forAtLeast(1, result.completions) { _.name shouldBe "util" }
     }
 
@@ -344,7 +347,7 @@ class RichPresentationCompilerSpec extends EnsimeSpec
     "package com.example",
     "import java.util.{ V@@ }"
   ) { (p, cc) =>
-      val result = cc.completionsAt(p, 10, caseSens = false)
+      val result = cc.completionsAt(p, 10, caseSens = false).futureValue
       forAtLeast(1, result.completions) { _.name shouldBe "Vector" }
     }
 
@@ -353,7 +356,7 @@ class RichPresentationCompilerSpec extends EnsimeSpec
     "import java.util.Vector",
     "object A { def main { new V@@ } }"
   ) { (p, cc) =>
-      val result = cc.completionsAt(p, 10, caseSens = false)
+      val result = cc.completionsAt(p, 10, caseSens = false).futureValue
       forAtLeast(1, result.completions) { x =>
         x.name shouldBe "Vector"
         x.typeInfo.get shouldBe a[ArrowTypeInfo]
@@ -364,7 +367,7 @@ class RichPresentationCompilerSpec extends EnsimeSpec
     "package com.example",
     "object A { val apple = true; true || app@@ }"
   ) { (p, cc) =>
-      val result = cc.completionsAt(p, 10, caseSens = false)
+      val result = cc.completionsAt(p, 10, caseSens = false).futureValue
       assert(result.completions.exists(_.name == "apple"))
     }
 
@@ -372,7 +375,7 @@ class RichPresentationCompilerSpec extends EnsimeSpec
     "package com.example",
     "object A { val t = Set[String](\"a\", \"b\"); t @@ }"
   ) { (p, cc) =>
-      val result = cc.completionsAt(p, 10, caseSens = false)
+      val result = cc.completionsAt(p, 10, caseSens = false).futureValue
       forAtLeast(1, result.completions) { _.name shouldBe "seq" }
       forAtLeast(1, result.completions) { _.name shouldBe "|" }
       forAtLeast(1, result.completions) { _.name shouldBe "&" }
@@ -383,7 +386,7 @@ class RichPresentationCompilerSpec extends EnsimeSpec
     "object Abc { def aMethod(a: Int) = a }",
     s"""object B { val x = s"hello there, $${Abc.aMe@@}"}"""
   ) { (p, cc) =>
-      val result = cc.completionsAt(p, 10, caseSens = false)
+      val result = cc.completionsAt(p, 10, caseSens = false).futureValue
       forAtLeast(1, result.completions) { _.name shouldBe "aMethod" }
     }
 
@@ -392,7 +395,7 @@ class RichPresentationCompilerSpec extends EnsimeSpec
     "object Abc { def aMethod(a: Int) = a }",
     "object B { val x = \"hello there Ab@@\"}"
   ) { (p, cc) =>
-      val result = cc.completionsAt(p, 10, caseSens = false)
+      val result = cc.completionsAt(p, 10, caseSens = false).futureValue
       result.completions shouldBe empty
     }
 

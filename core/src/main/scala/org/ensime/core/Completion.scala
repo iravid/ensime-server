@@ -40,7 +40,7 @@
 package org.ensime.core
 
 import scala.collection.mutable
-import scala.concurrent.{ Await, Future }
+import scala.concurrent.{ ExecutionContext, Future }
 import scala.concurrent.duration._
 import scala.reflect.internal.util.{ BatchSourceFile, SourceFile }
 
@@ -78,7 +78,7 @@ trait CompletionControl {
 
   import CompletionUtil._
 
-  def completionsAt(inputP: Position, maxResultsArg: Int, caseSens: Boolean): CompletionInfoList = {
+  def completionsAt(inputP: Position, maxResultsArg: Int, caseSens: Boolean)(implicit ec: ExecutionContext): Future[CompletionInfoList] = {
     val origContents = inputP.source.content
     val point = inputP.endOrCursor
 
@@ -86,7 +86,7 @@ trait CompletionControl {
       // invalid request - completion point is outside of file
       // this causes an ArrayOutOfBounds in the array copy below
       logger.warn("completionsAt request has point outside of file")
-      CompletionInfoList("", List.empty)
+      Future.successful(CompletionInfoList("", List.empty))
     } else {
       val maxResults = if (maxResultsArg == 0) SimpleLucene.MaxResults else maxResultsArg
 
@@ -159,22 +159,26 @@ trait CompletionControl {
           logger.error("Unrecognized completion context.")
           None
       }
+
       contextOpt match {
         case Some(context) =>
-          CompletionInfoList(
-            context.prefix,
-            makeAll(context, maxResults, caseSens).sortWith({ (c1, c2) =>
+          for {
+            compResults <- makeAll(context, maxResults, caseSens)
+            sorted = compResults.sortWith { (c1, c2) =>
               c1.relevance > c2.relevance ||
                 (c1.relevance == c2.relevance &&
                   c1.name.length < c2.name.length)
-            }).take(maxResults)
-          )
-        case _ => CompletionInfoList("", Nil)
+            }
+            filtered = sorted.take(maxResults)
+          } yield CompletionInfoList(context.prefix, filtered)
+
+        case _ =>
+          Future.successful(CompletionInfoList("", Nil))
       }
     }
   }
 
-  def makeAll(context: CompletionContext, maxResults: Int, caseSens: Boolean): List[CompletionInfo] = {
+  def makeAll(context: CompletionContext, maxResults: Int, caseSens: Boolean)(implicit ec: ExecutionContext): Future[List[CompletionInfo]] = {
 
     def toCompletionInfo(
       context: CompletionContext,
@@ -271,8 +275,6 @@ trait CompletionControl {
       }
     }
 
-    val typeSearchResults = typeSearch.flatMap(Await.result(_, Duration.Inf))
-
     def keywordCompletions(prefix: String): Seq[CompletionInfo] = {
       if (prefix.length > 0) {
         Keywords.keywordCompletions.filter(_.name.startsWith(prefix))
@@ -280,8 +282,13 @@ trait CompletionControl {
         Seq()
     }
 
-    buff.toList ++ typeSearchResults.getOrElse(Nil) ++ keywordCompletions(context.prefix)
+    val pcResults = buff.toList
 
+    typeSearch
+      .getOrElse(Future.successful(None))
+      .map { searchResults =>
+        pcResults ++ searchResults.getOrElse(Nil) ++ keywordCompletions(context.prefix)
+      }
   }
 
 }

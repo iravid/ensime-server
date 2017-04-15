@@ -50,6 +50,7 @@ object RichPresentationCompilerFixture {
     system: ActorSystem,
     vfs: EnsimeVFS
   ): RichPresentationCompiler = {
+    import system.dispatcher
     val scalaLib = config.allJars.find(_.getName.contains("scala-library")).get
 
     val presCompLog = LoggerFactory.getLogger(classOf[Global])

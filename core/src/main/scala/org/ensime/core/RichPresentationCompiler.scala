@@ -41,6 +41,7 @@ package org.ensime.core
 import java.io.File
 import java.nio.charset.Charset
 
+import scala.concurrent.{ ExecutionContext, Future }
 import scala.collection.mutable
 import scala.reflect.internal.util.{ BatchSourceFile, RangePosition, SourceFile }
 import scala.reflect.io.{ PlainFile, VirtualFile }
@@ -199,7 +200,7 @@ trait RichCompilerControl extends CompilerControl with RefactoringControl with C
   def askCompletePackageMember(path: String, prefix: String): List[CompletionInfo] =
     askOption(completePackageMember(path, prefix)).getOrElse(List.empty)
 
-  def askCompletionsAt(p: Position, maxResults: Int, caseSens: Boolean): CompletionInfoList =
+  def askCompletionsAt(p: Position, maxResults: Int, caseSens: Boolean): Future[CompletionInfoList] =
     completionsAt(p, maxResults, caseSens)
 
   def askReloadAndTypeFiles(files: Iterable[SourceFile]) =
@@ -286,7 +287,8 @@ class RichPresentationCompiler(
   val search: SearchService
 )(
   implicit
-  val vfs: EnsimeVFS
+  val vfs: EnsimeVFS,
+  val ec: ExecutionContext
 ) extends Global(settings, richReporter)
     with ModelBuilders with RichCompilerControl
     with RefactoringImpl with Completion with Helpers

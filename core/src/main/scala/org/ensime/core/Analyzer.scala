@@ -8,19 +8,21 @@ import java.nio.charset.Charset
 import org.ensime.api._
 import org.ensime.util.ensimefile._
 import akka.actor._
+import akka.pattern.pipe
 import akka.event.LoggingReceive.withLabel
 import org.ensime.api._
 import org.ensime.config._
 import org.ensime.vfs._
 import org.ensime.indexer.SearchService
 import org.ensime.model._
-import org.ensime.util.{ PresentationReporter, ReportHandler, FileUtils }
+import org.ensime.util.{ FileUtils, PresentationReporter, ReportHandler }
 import org.ensime.util.sourcefile._
 import org.slf4j.LoggerFactory
 import org.ensime.util.file._
 import org.ensime.util.sourcefile._
 
 import scala.collection.breakOut
+import scala.concurrent.Future
 import scala.reflect.internal.util.{ OffsetPosition, RangePosition, SourceFile }
 import scala.tools.nsc.Settings
 import scala.tools.nsc.interactive.Global
@@ -57,6 +59,7 @@ class Analyzer(
     implicit val vfs: EnsimeVFS
 ) extends Actor with Stash with ActorLogging with RefactoringHandler {
 
+  import context.dispatcher
   import FileUtils._
 
   private var allFilesMode = false
@@ -202,10 +205,11 @@ class Analyzer(
     case req: RefactorReq =>
       sender ! handleRefactorRequest(req)
     case CompletionsReq(fileInfo, point, maxResults, caseSens, _reload) =>
-      sender ! withExisting(fileInfo) {
+      withExistingAsync(fileInfo) {
         reporter.disable()
         scalaCompiler.askCompletionsAt(pos(fileInfo, point), maxResults, caseSens)
-      }
+      } pipeTo sender
+
     case UsesOfSymbolAtPointReq(file, point) =>
       sender ! withExisting(file) {
         val p = pos(file, point)
@@ -310,6 +314,9 @@ class Analyzer(
 
   def withExisting(x: SourceFileInfo)(f: => RpcResponse): RpcResponse =
     if (x.exists()) f else EnsimeServerError(s"File does not exist: ${x.file}")
+
+  def withExistingAsync(x: SourceFileInfo)(f: => Future[RpcResponse]): Future[RpcResponse] =
+    if (x.exists()) f else Future.successful(EnsimeServerError(s"File does not exist: ${x.file}"))
 
   def pos(file: File, range: OffsetRange): OffsetPosition =
     pos(createSourceFile(file), range)
