@@ -12,9 +12,10 @@ import org.ensime.util.file.File
 import scala.concurrent.{ ExecutionContext, Future }
 import scala.tools.nsc.io.AbstractFile
 import scala.tools.refactoring._
-import scala.tools.refactoring.analysis.GlobalIndexes
+import scala.tools.refactoring.analysis.{ GlobalIndexes, TreeAnalysis }
 import scala.tools.refactoring.common.{ Change, CompilerAccess, RenameSourceFileChange }
 import scala.tools.refactoring.implementations._
+import scala.tools.refactoring.transformation.TreeFactory
 
 abstract class RefactoringEnvironment(file: String, start: Int, end: Int) {
 
@@ -176,6 +177,16 @@ trait RefactoringImpl {
     }
   }
 
+  protected def doExpandMatchCases(procId: Int, tpe: RefactorType, file: File, start: Int, end: Int): Either[RefactorFailure, RefactorDiffEffect] =
+    new RefactoringEnvironment(file.getPath, start, end) {
+      val refactoring = new ExpandMatchCases with GlobalIndexes {
+        val global = RefactoringImpl.this
+        val cuIndexes = this.global.activeUnits().map { u => CompilationUnitIndex(u.body) }
+        val index = GlobalIndex(cuIndexes)
+      }
+      val result = performRefactoring(procId, tpe, ())
+    }.result
+
   protected def reloadAndType(f: File) = reloadAndTypeFiles(List(this.createSourceFile(f.getPath)))
 
   protected def doRefactor(
@@ -191,7 +202,9 @@ trait RefactoringImpl {
     ): Future[Either[RefactorFailure, RefactorDiffEffect]] =
       Future.successful(
         askOption {
-          try { op } catch {
+          try {
+            op
+          } catch {
             case e: Throwable =>
               logger.error("Error during refactor request: " + refactor, e)
               Left(RefactorFailure(procId, e.toString))
@@ -244,7 +257,117 @@ trait RefactoringImpl {
           reloadAndType(file)
           doAddImport(procId, tpe, qualifiedName, file)
         }
+      case ExpandMatchCasesDesc(file, start, end) =>
+        askRefactorResult {
+          reloadAndType(file)
+          doExpandMatchCases(procId, tpe, file, start, end)
+        }
+    }
+  }
+}
+
+abstract class ExpandMatchCases extends MultiStageRefactoring
+    with TreeAnalysis with analysis.Indexes with TreeFactory with common.InteractiveScalaCompiler {
+  import global._
+
+  case class PreparationResult(matchBlock: Match, selectorType: SelectorType)
+
+  sealed trait SelectorType
+  case object SingleCaseClass extends SelectorType
+  case object SingleCaseObject extends SelectorType
+  case object SealedTraitOrAbstractClass extends SelectorType
+
+  type RefactoringParameters = Unit
+
+  def prepare(s: Selection): Either[PreparationError, PreparationResult] = {
+    val selectedTree = s.findSelectedWithPredicate {
+      case _: SymTree | _: TermTree => true
+      case _ => false
+    }
+
+    selectedTree match {
+      case Some(Match(_, cases)) if cases.nonEmpty =>
+        Left(PreparationError("Match block is not empty"))
+      case Some(m @ Match(selector, _)) if selector.tpe.typeSymbol.isModuleClass =>
+        Right(PreparationResult(m, SingleCaseObject))
+      case Some(m @ Match(selector, _)) if selector.tpe.typeSymbol.isCaseClass =>
+        Right(PreparationResult(m, SingleCaseClass))
+      case Some(m @ Match(selector, _)) if (selector.tpe.typeSymbol.isTrait || selector.tpe.typeSymbol.isAbstractClass)
+        && selector.tpe.typeSymbol.isSealed =>
+        Right(PreparationResult(m, SealedTraitOrAbstractClass))
+      case Some(m @ Match(selector, _)) =>
+        Left(PreparationError(s"Selector is not a case class or sealed trait: ${showRaw(selector)}\n${showRaw(m)}"))
+      case Some(otherwise) =>
+        Left(PreparationError(s"Selection is not inside a match block: ${showRaw(otherwise)}"))
+      case None =>
+        Left(PreparationError("No selected SymTree/TermTree found"))
     }
   }
 
+  def perform(selection: Selection, prepared: PreparationResult, params: Unit): Either[RefactoringError, List[Change]] = {
+    val caseDefs = prepared.selectorType match {
+      case SingleCaseClass | SingleCaseObject =>
+        val tpe = prepared.matchBlock.selector.tpe
+        val maybePat = toPatDef(tpe)
+
+        maybePat.right.map(List(_))
+
+      case SealedTraitOrAbstractClass =>
+        val tpe = prepared.matchBlock.selector.tpe
+        val ctors = collectCtors(tpe)
+        val maybePats = ctors map toPatDef
+        val errs = maybePats collect { case Left(e) => e }
+        val pats = maybePats collect { case Right(p) => p }
+
+        if (errs.nonEmpty) Left(RefactoringError(errs.map(_.cause).mkString("\n")))
+        else Right(pats)
+    }
+
+    caseDefs.right.map { defs =>
+      val replacement =
+        topdown {
+          matchingChildren {
+            once {
+              filter {
+                case prepared.matchBlock => true
+              } &>
+                transform {
+                  case m @ Match(selector, _) =>
+                    Match(selector.duplicate.setPos(NoPosition), defs)
+                }
+            }
+          }
+        }
+
+      transformFile(selection.file, replacement)
+    }
+  }
+
+  def collectCtors(baseTpe: Type): List[Type] = {
+    def ctors(sym: ClassSymbol): List[ClassSymbol] =
+      sym.knownDirectSubclasses.toList.flatMap { subclass =>
+        val subSym = subclass.asClass
+        if (subSym.isCaseClass || sym.isModuleClass) List(subSym)
+        else if ((subSym.isTrait || subSym.isAbstractClass) && subSym.isSealed) ctors(subSym)
+        else List()
+      }
+
+    ctors(baseTpe.typeSymbol.asClass).map(_.tpe)
+  }
+
+  def toPatDef(tpe: Type): Either[RefactoringError, CaseDef] =
+    if (tpe.typeSymbol.asClass.isModuleClass) Right(CaseDef(caseObjectPattern(tpe), Ident("???")))
+    else if (tpe.typeSymbol.asClass.isCaseClass) Right(CaseDef(caseClassExtractionPattern(tpe), Ident("???")))
+    else Left(RefactoringError(s"${tpe} is not a case object or case class in toPatDef"))
+
+  def caseClassExtractionPattern(tpe: Type): Tree = {
+    val fields: List[Tree] = tpe.decls.collect {
+      case f: TermSymbol if f.isPublic && f.isCaseAccessor => Ident(f.name.toTermName)
+    }.toList
+    val companion = tpe.typeSymbol.companionSymbol
+
+    Apply(companion, fields: _*)
+  }
+
+  def caseObjectPattern(tpe: Type): Tree = Ident(tpe.typeSymbol)
 }

@@ -173,6 +173,8 @@ final case class OrganiseImportsRefactorDesc(file: File) extends RefactorDesc(Re
 final case class AddImportRefactorDesc(qualifiedName: String, file: File)
   extends RefactorDesc(RefactorType.AddImport)
 
+final case class ExpandMatchCasesDesc(file: File, start: Int, end: Int) extends RefactorDesc(RefactorType.ExpandMatchCases)
+
 sealed trait PatchOp {
   def start: Int
 }

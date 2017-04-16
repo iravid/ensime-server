@@ -88,8 +88,9 @@ object RefactorType {
   case object InlineLocal extends RefactorType('inlineLocal)
   case object OrganizeImports extends RefactorType('organizeImports)
   case object AddImport extends RefactorType('addImport)
+  case object ExpandMatchCases extends RefactorType('expandMatchCases)
 
-  def allTypes = Seq(Rename, ExtractMethod, ExtractLocal, InlineLocal, OrganizeImports, AddImport)
+  def allTypes = Seq(Rename, ExtractMethod, ExtractLocal, InlineLocal, OrganizeImports, AddImport, ExpandMatchCases)
 }
 
 /**

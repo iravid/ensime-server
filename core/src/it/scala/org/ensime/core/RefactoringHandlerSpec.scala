@@ -6,6 +6,7 @@ import java.io.File
 import java.nio.charset.Charset
 import java.text.SimpleDateFormat
 import java.util.Date
+
 import org.ensime.api._
 import org.ensime.fixture._
 import org.ensime.util.EnsimeSpec
@@ -210,6 +211,71 @@ class RefactoringHandlerSpec extends EnsimeSpec
                                      |+
                                      |+import scala._
                                      |  \n""".stripMargin
+      val expectedContents = expectedDiffContent(file.path, relevantExpectedPart)
+
+      diffContent should ===(expectedContents)
+    }
+  }
+
+  it should "handle expand match cases" in {
+    withAnalyzer { (dir, analyzerRef) =>
+      val linesBefore =
+        """
+          |package data {
+          |  sealed trait Family
+          |  case class A(s: java.lang.String, i: java.lang.Integer) extends Family
+          |  case class B(l: java.lang.Long) extends Family
+          |  sealed trait SubFamily extends Family
+          |  case class C(b: java.lang.Boolean) extends SubFamily
+          |  case object D extends SubFamily
+          |  sealed abstract class SubAbstract extends Family
+          |  case class E(l: java.lang.Long) extends SubAbstract
+          |}
+          |package test {
+          |  object Data {
+          |    val f: data.Family = ???
+          |    f match {
+        """.stripMargin
+      val targetLine = ""
+      val linesAfter =
+        """
+          |    }
+          |  }
+          |}
+          |
+        """.stripMargin
+
+      val file = srcFile(dir, "tmp-contents", contents(
+        linesBefore,
+        targetLine,
+        linesAfter
+      ), write = true, encoding = encoding)
+
+      val analyzer = analyzerRef.underlyingActor
+
+      val procId = 1
+      val result = analyzer.handleRefactorRequest(
+        new RefactorReq(
+          procId, ExpandMatchCasesDesc(new File(file.path), linesBefore.length, linesBefore.length + targetLine.length), false
+        )
+      ).futureValue
+
+      val diffContent = extractDiffFromResponse(result, analyzer.charset)
+      val relevantExpectedPart = """@@ -15,6 +15,8 @@
+                |     f match {
+                |-        
+                |-
+                |-
+                |-    }
+                |+  case A(s, i) => ???
+                |+  case B(l) => ???
+                |+  case C(b) => ???
+                |+  case D => ???
+                |+  case E(l) => ???
+                |+}
+                |   }
+                |""".stripMargin
+
       val expectedContents = expectedDiffContent(file.path, relevantExpectedPart)
 
       diffContent should ===(expectedContents)
