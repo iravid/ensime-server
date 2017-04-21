@@ -698,6 +698,10 @@ object SwankProtocolRequest {
     def write(v: RefactorDesc): Sexp = ???
     def read(sexp: Sexp): RefactorDesc = sexp match {
       case SexpList(params) =>
+        val isExpandMatchCases = params.grouped(2).collect {
+          case List(t @ SexpSymbol("tpe"), s @ SexpString("expandMatchCases")) => (t, s)
+        }.nonEmpty
+
         params.grouped(2).collect {
           case List(SexpSymbol("qualifiedName"), value) => (Loc.QualifiedName, value)
           case List(SexpSymbol("file"), value) => (Loc.File, value)
@@ -727,6 +731,12 @@ object SwankProtocolRequest {
             (Loc.Name, SexpString(name)),
             (Loc.Start, SexpNumber(start))
             ) => ExtractLocalRefactorDesc(name, File(f).canon, start.intValue, end.intValue)
+
+          case List(
+            (Loc.End, SexpNumber(end)),
+            (Loc.File, SexpString(f)),
+            (Loc.Start, SexpNumber(start))
+            ) if isExpandMatchCases => ExpandMatchCasesDesc(File(f).canon, start.intValue, end.intValue)
 
           case List(
             (Loc.End, SexpNumber(end)),

@@ -169,6 +169,16 @@ class SwankFormatsSpec extends EnsimeSpec with EnsimeTestData {
     )
 
     unmarshal(
+      s"""(swank:diff-refactor 1 (end 100 file "$file1" start 1) nil)""",
+      RefactorReq(1, InlineLocalRefactorDesc(file1, 1, 100), false): RpcRequest
+    )
+
+    unmarshal(
+      s"""(swank:diff-refactor 1 (end 100 file "$file1" start 1 tpe "expandMatchCases") nil)""",
+      RefactorReq(1, ExpandMatchCasesDesc(file1, 1, 100), false): RpcRequest
+    )
+
+    unmarshal(
       s"""(swank:symbol-designations "$file1" 1 100 (object val))""",
       SymbolDesignationsReq(
         Left(file1), 1, 100,
