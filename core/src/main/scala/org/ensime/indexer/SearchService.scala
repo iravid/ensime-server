@@ -186,9 +186,15 @@ class SearchService(
           (outerClassFile, checksLookup.get(outerClassFile.uriString))
       }(collection.breakOut)
 
-      Future.sequence(
-        (jarsWithChecks ++ basesWithChecks).collect { case (file, check) => indexBase(file, check, classFiles) }
-      ).map(_.sum)
+      (jarsWithChecks ++ basesWithChecks).grouped(10).foldLeft(Future.successful(0)) {
+        (indexedCount, batch) =>
+          for {
+            c <- indexedCount
+            b <- Future.sequence {
+              batch.map { case (file, check) => indexBase(file, check, classFiles) }
+            }.map(_.sum)
+          } yield c + b
+      }
     }
 
     // chain together all the future tasks
