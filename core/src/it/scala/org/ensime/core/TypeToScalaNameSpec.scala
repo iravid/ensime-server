@@ -264,6 +264,24 @@ class TypeToScalaNameSpec extends EnsimeSpec
       "  val int@intlist@List: IntList = ???",
       "  type IntMap[A] = Map[Int, A]",
       "  val int@intmap@map: IntMap[Int] = ???",
+      "  type Env[E, A] = (E, A)",
+      "  val en@env@v: Env[String, Int] = ???",
+      "  type StringEnv[A] = Env[String, A]",
+      "  val string@stringenv@env: StringEnv[Int] = ???",
+      "  type EnvT[E, F[_], A] = (E, F[A])",
+      "  val maybe@maybeenv@env: EnvT[String, Option, String] = ???",
+      "  type MaybeStringEnv[A] = EnvT[String, Option, A]",
+      "  val maybe@maybestringenv@stringenv: MaybeStringEnv[Int] = ???",
+      "  type Arrow[A, B] = A => B",
+      "  val intString@intstringarrow@Arrow: Arrow[Int, String] = ???",
+      "  type Kleisli[F[_], A, B] = A => F[B]",
+      "  val intOption@intoptionstring@String: Kleisli[Option, Int, String] = ???",
+      "  type IntReader[A] = Int => A",
+      "  val int@intreader@reader: IntReader[String] = ???",
+      "  type IntArrow[A] = Arrow[Int, A]",
+      "  val int@intarrow@arrow: IntArrow[String] = ???",
+      "  type IntKleisli[F[_], A] = Kleisli[F, Int, A]",
+      "  val int@intkleisli@kleisli: IntKleisli[Option, String] = ???",
       "}"
     ) { (p, label, cc) =>
         withClue(label) {
@@ -276,6 +294,26 @@ class TypeToScalaNameSpec extends EnsimeSpec
                 BasicTypeInfo("IntList", DeclaredAs.Nil, "com.example.TypeAliases.IntList")
               case "intmap" =>
                 BasicTypeInfo("IntMap[Int]", DeclaredAs.Nil, "com.example.TypeAliases.IntMap[scala.Int]")
+              case "env" =>
+                BasicTypeInfo("Env[String, Int]", DeclaredAs.Nil, "com.example.TypeAliases.Env[java.lang.String, scala.Int]")
+              case "stringenv" =>
+                BasicTypeInfo("StringEnv[Int]", DeclaredAs.Nil, "com.example.TypeAliases.StringEnv[scala.Int]")
+              case "maybeenv" =>
+                BasicTypeInfo("EnvT[String, Option, String]", DeclaredAs.Nil,
+                  "com.example.TypeAliases.EnvT[java.lang.String, scala.Option, java.lang.String]")
+              case "maybestringenv" =>
+                BasicTypeInfo("MaybeStringEnv[Int]", DeclaredAs.Nil,
+                  "com.example.TypeAliases.MaybeStringEnv[scala.Int]")
+              case "intstringarrow" =>
+                BasicTypeInfo("Arrow[Int, String]", DeclaredAs.Nil, "com.example.TypeAliases.Arrow[scala.Int, java.lang.String]")
+              case "intoptionstring" =>
+                BasicTypeInfo("Kleisli[Option, Int, String]", DeclaredAs.Nil, "com.example.TypeAliases.Kleisli[scala.Option, scala.Int, java.lang.String]")
+              case "intreader" =>
+                BasicTypeInfo("IntReader[String]", DeclaredAs.Nil, "com.example.TypeAliases.IntReader[java.lang.String]")
+              case "intarrow" =>
+                BasicTypeInfo("IntArrow[String]", DeclaredAs.Nil, "com.example.TypeAliases.IntArrow[java.lang.String]")
+              case "intkleisli" =>
+                BasicTypeInfo("IntKleisli[Option, String]", DeclaredAs.Nil, "com.example.TypeAliases.IntKleisli[scala.Option, java.lang.String]")
             }
           }
         }

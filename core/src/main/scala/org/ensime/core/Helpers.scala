@@ -30,9 +30,11 @@ trait Helpers { self: Global =>
     members.toList.filter { _.isConstructor }
   }
 
-  def isArrowType(tpe: Type): Boolean = {
+  def isArrowType(tpe: Type, shouldDealias: Boolean = true): Boolean = {
+    val typeSym = if (shouldDealias) tpe.typeSymbol else tpe.typeSymbolDirect
+
     tpe match {
-      case args: ArgsTypeRef if args.typeSymbol.fullName.startsWith("scala.Function") => true
+      case args: ArgsTypeRef if typeSym.fullName.startsWith("scala.Function") => true
       case TypeRef(_, definitions.ByNameParamClass, _) => true
       case _: MethodType => true
       case _: PolyType => true

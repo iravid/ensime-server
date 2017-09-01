@@ -143,9 +143,9 @@ trait ModelBuilders {
         case t => t
       }
 
-      def basicTypeInfo(tpe: Type): BasicTypeInfo = {
-        val shouldDealias = shouldDealiasType(tpe)
+      val shouldDealias = shouldDealiasType(tpe)
 
+      def basicTypeInfo(tpe: Type): BasicTypeInfo = {
         val typeSym = if (shouldDealias) tpe.typeSymbol else tpe.typeSymbolDirect
         val symbolToLocate = if (typeSym.isModuleClass) typeSym.sourceModule else typeSym
         val symPos = locateSymbolPos(symbolToLocate, needPos)
@@ -162,7 +162,7 @@ trait ModelBuilders {
         )
       }
       tpe match {
-        case arrow if isArrowType(arrow) => ArrowTypeInfoBuilder(tpe)
+        case arrow if isArrowType(arrow, shouldDealias) => ArrowTypeInfoBuilder(tpe)
         case tpe: NullaryMethodType => basicTypeInfo(tpe.resultType)
         case tpe: Type => basicTypeInfo(tpe)
         case _ => nullInfo
