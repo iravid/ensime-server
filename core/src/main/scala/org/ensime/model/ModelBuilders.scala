@@ -2,6 +2,8 @@
 // License: http://www.gnu.org/licenses/gpl-3.0.en.html
 package org.ensime.model
 
+import fs2.Strategy
+
 import org.ensime.api
 import org.ensime.api._
 import org.ensime.core.{ FqnToSymbol, RichPresentationCompiler }
@@ -16,6 +18,7 @@ import scala.reflect.internal.util.{ NoPosition, Position }
 
 trait ModelBuilders {
   self: RichPresentationCompiler with FqnToSymbol =>
+  implicit def strategy: Strategy
 
   def locateSymbolPos(sym: Symbol, needPos: PosNeeded): Option[SourcePosition] =
     _locateSymbolPos(sym, needPos).orElse({
@@ -40,7 +43,7 @@ trait ModelBuilders {
         val fqn = toFqn(sym).fqnString
         logger.debug(s"$sym ==> $fqn")
 
-        val hit = search.findUnique(fqn)
+        val hit = search.findUnique(fqn).unsafeRun()
         logger.debug(s"search: $fqn = $hit")
         hit.flatMap(LineSourcePositionHelper.fromFqnSymbol(_)(vfs)).flatMap {
           sourcePos =>

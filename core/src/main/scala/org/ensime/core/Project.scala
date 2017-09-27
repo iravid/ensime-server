@@ -2,7 +2,7 @@
 // License: http://www.gnu.org/licenses/gpl-3.0.en.html
 package org.ensime.core
 
-import scala.concurrent.Await
+import fs2.Strategy
 import scala.concurrent.duration._
 import scala.util._
 
@@ -31,6 +31,8 @@ class Project(
     with ActorLogging
     with Stash {
   import context.system
+  implicit val strategy: Strategy =
+    Strategy.fromExecutionContext(context.dispatcher)
 
   /* The main components of the ENSIME server */
   private var scalac: ActorRef   = _
@@ -86,6 +88,7 @@ class Project(
     )(collection.breakOut)
     searchService
       .refresh()
+      .unsafeRunAsyncFuture()
       .onComplete {
         case Success((deletes, inserts)) =>
           broadcaster ! Broadcaster.Persist(IndexerReadyEvent)
@@ -123,7 +126,7 @@ class Project(
 
   override def postStop(): Unit = {
     // make sure the "reliable" dependencies are cleaned up
-    Try(Await.result(searchService.shutdown(), Duration.Inf))
+    Try(searchService.shutdown().unsafeRun())
     Try(vfs.close())
   }
 

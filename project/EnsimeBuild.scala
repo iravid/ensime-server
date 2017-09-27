@@ -195,6 +195,7 @@ object EnsimeBuild {
         "org.scala-lang" % "scalap" % scalaVersion.value,
         "com.typesafe.akka" %% "akka-actor" % akkaVersion,
         "com.typesafe.akka" %% "akka-slf4j" % akkaVersion,
+        "co.fs2" %% "fs2-core" % "0.9.7",
         {
           // see notes in https://github.com/ensime/ensime-server/pull/1446
           val suffix = CrossVersion.partialVersion(scalaVersion.value) match {

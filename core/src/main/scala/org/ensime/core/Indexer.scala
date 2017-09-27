@@ -2,6 +2,7 @@
 // License: http://www.gnu.org/licenses/gpl-3.0.en.html
 package org.ensime.core
 
+import fs2.Strategy
 import java.net.URI
 import java.nio.file.Paths
 
@@ -25,6 +26,9 @@ class Indexer(
 ) extends Actor
     with ActorLogging {
 
+  implicit val strategy: Strategy =
+    Strategy.fromExecutionContext(context.dispatcher)
+
   private def typeResult(hit: FqnSymbol) = TypeSearchResult(
     hit.fqn,
     hit.fqn.split("\\.").last,
@@ -40,6 +44,7 @@ class Indexer(
 
     index
       .searchClasses(query, max)
+      .unsafeRun()
       .map {
         case c: ClassDef => c.copy(fqn = strip(c.fqn))
         case f: Field    => f.copy(fqn = strip(f.fqn))
@@ -52,7 +57,7 @@ class Indexer(
   private val typeDecls: Set[DeclaredAs] =
     Set(DeclaredAs.Class, DeclaredAs.Trait, DeclaredAs.Object)
   def oldSearchSymbols(terms: List[String], max: Int) =
-    index.searchClassesMethods(terms, max).flatMap {
+    index.searchClassesMethods(terms, max).unsafeRun().flatMap {
       case hit if typeDecls.contains(hit.declAs) => Some(typeResult(hit))
       case hit if hit.declAs == DeclaredAs.Method =>
         Some(
@@ -111,7 +116,7 @@ class Indexer(
         )
         SourcePositions(positionHints)
       }
-      pipe(response) to sender
+      pipe(response.unsafeRunAsyncFuture()) to sender
 
     case FindHierarchy(fqn: String) =>
       import context.dispatcher
@@ -150,7 +155,7 @@ class Indexer(
         anc <- ancestors
         inh <- inheritors
       } yield HierarchyInfo(anc.getOrElse(Nil), inh.getOrElse(Nil))
-      pipe(symbolTreeInfo) to sender
+      pipe(symbolTreeInfo.unsafeRunAsyncFuture()) to sender
   }
 }
 object Indexer {

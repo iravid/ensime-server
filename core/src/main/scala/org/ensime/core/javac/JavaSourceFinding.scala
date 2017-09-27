@@ -4,6 +4,7 @@ package org.ensime.core.javac
 
 import akka.event.slf4j.SLF4JLogging
 import com.sun.source.util.TreePath
+import fs2.Strategy
 import javax.lang.model.element.Element
 
 import org.ensime.api._
@@ -14,6 +15,7 @@ import org.ensime.indexer.SearchService
 import org.ensime.indexer.FullyQualifiedName
 
 trait JavaSourceFinding extends Helpers with SLF4JLogging {
+  implicit def strategy: Strategy
 
   def askLinkPos(fqn: FullyQualifiedName,
                  file: SourceFileInfo): Option[SourcePosition]
@@ -51,7 +53,7 @@ trait JavaSourceFinding extends Helpers with SLF4JLogging {
                             path: TreePath): Option[SourcePosition] = {
     val javaFqn = fqn(c, path)
     val query   = javaFqn.map(_.fqnString).getOrElse("")
-    val hit     = search.findUnique(query)
+    val hit     = search.findUnique(query).unsafeRun()
     if (log.isTraceEnabled())
       log.trace(s"search: '$query' = $hit")
     hit.flatMap(LineSourcePositionHelper.fromFqnSymbol(_)(vfs)).flatMap {

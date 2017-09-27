@@ -2,6 +2,7 @@
 // License: http://www.gnu.org/licenses/gpl-3.0.en.html
 package org.ensime.indexer
 
+import fs2.{ Strategy, Task }
 import java.net.URI
 import org.ensime.util.Debouncer
 import scala.concurrent._
@@ -136,7 +137,7 @@ class SearchService(
    *
    * @return the number of rows (removed, indexed) from the database.
    */
-  def refresh(): Future[(Int, Int)] = {
+  def refresh()(implicit S: Strategy): Task[(Int, Int)] = {
     // it is much faster during startup to obtain the full list of
     // known files from the DB then and check against the disk, than
     // check each file against DatabaseService.outOfDate
@@ -150,7 +151,9 @@ class SearchService(
 
     // delete the stale data before adding anything new
     // returns number of rows deleted
-    def deleteReferences(checks: List[FileCheck]): Future[Int] = {
+    def deleteReferences(
+      checks: List[FileCheck]
+    )(implicit S: Strategy): Task[Int] = {
       log.debug(s"removing ${checks.size} stale files from the index")
       deleteInBatches(checks.map(_.file))
     }
@@ -177,27 +180,28 @@ class SearchService(
       baseName: FileName,
       fileCheck: Option[FileCheck],
       grouped: Map[FileName, Set[FileObject]]
-    ): Future[Int] = {
+    )(implicit S: Strategy): Task[Int] = {
       val base      = vfs.vfile(baseName.uriString)
       val outOfDate = fileCheck.forall(_.changed)
-      if (!outOfDate || !base.exists()) Future.successful(0)
+      if (!outOfDate || !base.exists()) Task.now(0)
       else {
         val boost = isUserFile(baseName)
-        val indexed = extractSymbolsFromClassOrJar(base, grouped).flatMap(
-          persist(_, commitIndex = false, boost = boost)
-        )
-        indexed.onComplete { _ =>
-          if (base.getName.getExtension == "jar") {
-            log.debug(s"finished indexing $base")
-          }
-        }
-        indexed
+
+        for {
+          symbols   <- extractSymbolsFromClassOrJar(base, grouped)
+          persisted <- persist(symbols, commitIndex = false, boost = boost)
+          _ <- Task.delay {
+                if (base.getName.getExtension == "jar") {
+                  log.debug(s"finished indexing $base")
+                }
+              }
+        } yield persisted
       }
     }
 
     // index all the given bases and return number of rows written
     def indexBases(files: (Set[FileObject], Map[FileName, Set[FileObject]]),
-                   checks: Seq[FileCheck]): Future[Int] = {
+                   checks: Seq[FileCheck]): Task[Int] = {
       val (jars, classFiles) = files
       log.debug("Indexing bases...")
 
@@ -215,26 +219,26 @@ class SearchService(
 
       (jarsWithChecks ++ basesWithChecks)
         .grouped(serverConfig.indexBatchSize)
-        .foldLeft(Future.successful(0)) { (indexedCount, batch) =>
+        .foldLeft(Task.now(0)) { (indexedCount, batch) =>
           for {
             c <- indexedCount
-            b <- Future.sequence {
-                  batch.map {
+            b <- Task
+                  .traverse(batch.toSeq) {
                     case (file, check) => indexBase(file, check, classFiles)
                   }
-                }.map(_.sum)
+                  .map(_.sum)
           } yield c + b
         }
     }
 
-    // chain together all the future tasks
+    // chain together all the tasks
     for {
-      checks  <- db.knownFiles()
+      checks  <- Task.fromFuture(db.knownFiles())
       stale   = findStaleFileChecks(checks)
       deletes <- deleteReferences(stale)
       bases   = findBases()
       added   <- indexBases(bases, checks)
-      _       <- index.commit()
+      _       <- Task.fromFuture(index.commit())
     } yield (deletes, added)
   }
 
@@ -242,9 +246,9 @@ class SearchService(
 
   def persist(symbols: List[SourceSymbolInfo],
               commitIndex: Boolean,
-              boost: Boolean): Future[Int] = {
-    val iwork = index.persist(symbols, commitIndex, boost)
-    val dwork = db.persist(symbols)
+              boost: Boolean)(implicit S: Strategy): Task[Int] = {
+    val iwork = Task.fromFuture(index.persist(symbols, commitIndex, boost))
+    val dwork = Task.fromFuture(db.persist(symbols))
 
     for {
       _       <- iwork
@@ -255,31 +259,25 @@ class SearchService(
   def extractSymbolsFromClassOrJar(
     file: FileObject,
     grouped: Map[FileName, Set[FileObject]]
-  ): Future[List[SourceSymbolInfo]] = {
-    def global: ExecutionContext = null // detach the global implicit
-    val ec                       = actorSystem.dispatchers.lookup("akka.search-service-dispatcher")
-
-    Future {
-      blocking {
-        file match {
-          case classfile if classfile.getName.getExtension == "class" =>
-            // too noisy to log
-            val files = grouped(classfile.getName)
-            try extractSymbols(classfile, files, classfile)
-            finally { files.foreach(_.close()); classfile.close() }
-          case jar =>
-            log.debug(s"indexing $jar")
-            val vJar = vfs.vjar(jar.asLocalFile)
-            try {
-              (scanGrouped(vJar) flatMap {
-                case (root, files) =>
-                  extractSymbols(jar, files, vfs.vfile(root.uriString))
-              }).toList
-            } finally { vfs.nuke(vJar) }
-        }
+  ): Task[List[SourceSymbolInfo]] =
+    Task.delay {
+      file match {
+        case classfile if classfile.getName.getExtension == "class" =>
+          // too noisy to log
+          val files = grouped(classfile.getName)
+          try extractSymbols(classfile, files, classfile)
+          finally { files.foreach(_.close()); classfile.close() }
+        case jar =>
+          log.debug(s"indexing $jar")
+          val vJar = vfs.vjar(jar.asLocalFile)
+          try {
+            (scanGrouped(vJar) flatMap {
+              case (root, files) =>
+                extractSymbols(jar, files, vfs.vfile(root.uriString))
+            }).toList
+          } finally { vfs.nuke(vJar) }
       }
-    }(ec)
-  }
+    }
 
   private val blacklist = Set("sun/", "sunw/", "com/sun/")
   private val ignore    = Set("$$", "$worker$")
@@ -399,40 +397,49 @@ class SearchService(
   }
 
   /** free-form search for classes */
-  def searchClasses(query: String, max: Int): List[FqnSymbol] = {
-    val fqns = Await.result(index.searchClasses(query, max), QUERY_TIMEOUT)
-    Await.result(db.find(fqns), QUERY_TIMEOUT) take max
-  }
+  def searchClasses(query: String,
+                    max: Int)(implicit S: Strategy): Task[List[FqnSymbol]] =
+    for {
+      fqns    <- Task.fromFuture(index.searchClasses(query, max))
+      results <- Task.fromFuture(db.find(fqns))
+    } yield results take max
 
   /** free-form search for classes and methods */
-  def searchClassesMethods(terms: List[String], max: Int): List[FqnSymbol] = {
-    val fqns =
-      Await.result(index.searchClassesMethods(terms, max), QUERY_TIMEOUT)
-    Await.result(db.find(fqns), QUERY_TIMEOUT) take max
-  }
+  def searchClassesMethods(terms: List[String], max: Int)(
+    implicit S: Strategy
+  ): Task[List[FqnSymbol]] =
+    for {
+      fqns    <- Task.fromFuture(index.searchClassesMethods(terms, max))
+      results <- Task.fromFuture(db.find(fqns))
+    } yield results take max
 
   /** only for exact fqns */
-  def findUnique(fqn: String): Option[FqnSymbol] =
-    Await.result(db.find(fqn), QUERY_TIMEOUT)
+  def findUnique(fqn: String)(implicit S: Strategy): Task[Option[FqnSymbol]] =
+    Task.fromFuture(db.find(fqn))
 
   /** returns hierarchy of a type identified by fqn */
-  def getTypeHierarchy(fqn: String,
-                       hierarchyType: Hierarchy.Direction,
-                       levels: Option[Int] = None): Future[Option[Hierarchy]] =
-    db.getClassHierarchy(fqn, hierarchyType, levels)
+  def getTypeHierarchy(
+    fqn: String,
+    hierarchyType: Hierarchy.Direction,
+    levels: Option[Int] = None
+  )(implicit S: Strategy): Task[Option[Hierarchy]] =
+    Task.fromFuture(db.getClassHierarchy(fqn, hierarchyType, levels))
 
   /** returns locations where given fqn is referred*/
-  def findUsageLocations(fqn: String): Future[Iterable[UsageLocation]] =
-    db.findUsageLocations(fqn)
+  def findUsageLocations(
+    fqn: String
+  )(implicit S: Strategy): Task[Iterable[UsageLocation]] =
+    Task.fromFuture(db.findUsageLocations(fqn))
 
   /** returns FqnSymbols where given fqn is referred*/
-  def findUsages(fqn: String): Future[Iterable[FqnSymbol]] = db.findUsages(fqn)
+  def findUsages(fqn: String)(implicit S: Strategy): Task[Iterable[FqnSymbol]] =
+    Task.fromFuture(db.findUsages(fqn))
 
   // blocking badness
-  def findClasses(file: EnsimeFile): Seq[ClassDef] =
-    Await.result(db.findClasses(file), QUERY_TIMEOUT)
-  def findClasses(jdi: String): Seq[ClassDef] =
-    Await.result(db.findClasses(jdi), QUERY_TIMEOUT)
+  def findClasses(file: EnsimeFile)(implicit S: Strategy): Task[Seq[ClassDef]] =
+    Task.fromFuture(db.findClasses(file))
+  def findClasses(jdi: String)(implicit S: Strategy): Task[Seq[ClassDef]] =
+    Task.fromFuture(db.findClasses(jdi))
 
   /* DELETE then INSERT in H2 is ridiculously slow, so we put all modifications
    * into a blocking queue and dedicate a thread to block on draining the queue.
@@ -450,17 +457,15 @@ class SearchService(
   def deleteInBatches(
     files: List[FileObject],
     batchSize: Int = 1000
-  ): Future[Int] = {
-    val removing = files.grouped(batchSize).map(delete)
-    Future.sequence(removing).map(_.sum)
-  }
+  )(implicit S: Strategy): Task[Int] =
+    Task.traverse(files.grouped(batchSize).toSeq)(delete).map(_.sum)
 
   // returns number of rows removed
-  def delete(files: List[FileObject]): Future[Int] = {
+  def delete(files: List[FileObject])(implicit S: Strategy): Task[Int] = {
     // this doesn't speed up Lucene deletes, but it means that we
     // don't wait for Lucene before starting the H2 deletions.
-    val iwork = index.remove(files)
-    val dwork = db.removeFiles(files)
+    val iwork = Task.fromFuture(index.remove(files))
+    val dwork = Task.fromFuture(db.removeFiles(files))
 
     for {
       _        <- iwork
@@ -472,10 +477,11 @@ class SearchService(
   def fileRemoved(f: FileObject): Unit = fileChanged(f)
   def fileAdded(f: FileObject): Unit   = fileChanged(f)
 
-  def shutdown(): Future[Unit] =
-    Future.sequence {
-      List(db.shutdown(), index.shutdown())
-    } map (_ => ())
+  def shutdown()(implicit S: Strategy): Task[Unit] =
+    for {
+      _ <- Task.fromFuture(db.shutdown())
+      _ <- Task.fromFuture(index.shutdown())
+    } yield ()
 }
 
 object SearchService {
@@ -543,6 +549,7 @@ class IndexingQueueActor(searchService: SearchService)
     extends Actor
     with ActorLogging {
   import scala.concurrent.duration._
+  implicit val S: Strategy = Strategy.fromExecutionContext(context.dispatcher)
 
   case object Process
 
@@ -600,6 +607,7 @@ class IndexingQueueActor(searchService: SearchService)
                         batch
                       )
                       .map(outerClassFile ->)
+                      .unsafeRunAsyncFuture()
               })
               .onComplete {
                 case Failure(t) =>
@@ -613,6 +621,7 @@ class IndexingQueueActor(searchService: SearchService)
                     .delete(
                       indexed.flatMap(f => batch(f._1))(collection.breakOut)
                     )
+                    .unsafeRunAsyncFuture()
                     .onComplete {
                       case Failure(t) =>
                         log.error(
@@ -626,6 +635,7 @@ class IndexingQueueActor(searchService: SearchService)
                             val boost = searchService.isUserFile(file)
                             val persisting = searchService
                               .persist(syms, commitIndex = true, boost = boost)
+                              .unsafeRunAsyncFuture()
 
                             persisting.onComplete {
                               case Failure(t) =>

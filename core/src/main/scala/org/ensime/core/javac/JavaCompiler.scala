@@ -14,6 +14,7 @@ import akka.event.slf4j.SLF4JLogging
 import com.sun.source.tree.Scope
 import com.sun.source.util.{ JavacTask, TreePath }
 import com.sun.tools.javac.util.Abort
+import fs2.Strategy
 import javax.tools._
 import org.ensime.api._
 import org.ensime.core.DocSigPair
@@ -38,6 +39,9 @@ class JavaCompiler(
     with Helpers
     with SLF4JLogging {
 
+  implicit val strategy = Strategy.fromExecutionContext(
+    scala.concurrent.ExecutionContext.Implicits.global
+  )
   private val listener   = new JavaDiagnosticListener()
   private val silencer   = new SilencedDiagnosticListener()
   private val cp         = config.classpath.mkString(JFile.pathSeparator)

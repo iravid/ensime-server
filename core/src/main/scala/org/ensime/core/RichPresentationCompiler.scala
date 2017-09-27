@@ -38,6 +38,7 @@
  */
 package org.ensime.core
 
+import fs2.Strategy
 import java.net.URI
 import java.nio.charset.Charset
 import java.nio.file.{ Path, Paths }
@@ -211,13 +212,14 @@ trait RichCompilerControl
   def usesOfSym(
     sym: Symbol
   )(implicit ec: ExecutionContext): Future[SCISet[RawFile]] = {
-    val noReverseLookups = search.noReverseLookups
+    implicit val strategy = Strategy.fromExecutionContext(ec)
+    val noReverseLookups  = search.noReverseLookups
     if (noReverseLookups) {
       Future.successful(Set.empty)
     } else {
       val symbolFqn = askSymbolFqn(sym)
       symbolFqn.fold(Future.successful(Set.empty[RawFile])) { fqn =>
-        val usages = search.findUsages(fqn.fqnString)
+        val usages = search.findUsages(fqn.fqnString).unsafeRunAsyncFuture()
         usages.map { usages =>
           val uniqueFiles: SCISet[RawFile] = usages.flatMap { u =>
             val source = u.source
@@ -344,7 +346,8 @@ class RichPresentationCompiler(
     with FqnToSymbol
     with TypeToScalaName {
 
-  val logger = LoggerFactory.getLogger(this.getClass)
+  implicit val strategy: Strategy = Strategy.fromExecutionContext(ec)
+  val logger                      = LoggerFactory.getLogger(this.getClass)
 
   private val symsByFile =
     new mutable.HashMap[AbstractFile, mutable.LinkedHashSet[Symbol]] {
