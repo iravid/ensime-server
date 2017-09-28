@@ -2,6 +2,7 @@
 // License: http://www.gnu.org/licenses/gpl-3.0.en.html
 package org.ensime.core
 
+import fs2.Strategy
 import org.ensime.api, api.{ BasicTypeInfo => _, _ }
 import org.ensime.fixture._
 import org.ensime.indexer.SearchServiceTestUtils._
@@ -19,6 +20,9 @@ class JavaCompilerSpec
 
   val original                   = EnsimeConfigFixture.SimpleTestProject.copy(javaSources = Nil)
   override def usePreWarmedIndex = false
+  implicit val strategy: Strategy = Strategy.fromExecutionContext(
+    scala.concurrent.ExecutionContext.Implicits.global
+  )
 
   // NOTE: we're intentionally removing the pre-indexing support so
   // that we don't have javaSources here, because they break
@@ -103,7 +107,7 @@ class JavaCompilerSpec
 
   it should "find symbol at point" in withJavaCompiler {
     (_, config, cc, store, search) =>
-      refresh()(search)
+      refresh()(search, strategy)
 
       runForPositionInCompiledSource(
         config,

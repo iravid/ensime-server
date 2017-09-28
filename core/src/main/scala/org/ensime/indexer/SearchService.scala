@@ -2,7 +2,7 @@
 // License: http://www.gnu.org/licenses/gpl-3.0.en.html
 package org.ensime.indexer
 
-import fs2.{ Strategy, Task }
+import fs2.{ Strategy, Stream, Task }
 import java.net.URI
 import org.ensime.util.Debouncer
 import scala.concurrent._
@@ -114,7 +114,7 @@ class SearchService(
 
   private def scanGrouped(
     f: FileObject
-  ): Map[FileName, Set[FileObject]] = {
+  ): Task[Map[FileName, Set[FileObject]]] = Task.delay {
     val results = new mutable.HashMap[FileName, mutable.Set[FileObject]]
     with mutable.MultiMap[FileName, FileObject]
     f.findFiles(ClassfileSelector) match {
@@ -141,40 +141,54 @@ class SearchService(
     // it is much faster during startup to obtain the full list of
     // known files from the DB then and check against the disk, than
     // check each file against DatabaseService.outOfDate
-    def findStaleFileChecks(checks: Seq[FileCheck]): List[FileCheck] = {
-      log.debug("findStaleFileChecks")
-      for {
-        check <- checks
-        if !check.file.exists || check.changed
-      } yield check
-    }.toList
+    def findStaleFileChecks(checks: Seq[FileCheck]): Task[List[FileCheck]] =
+      Task.delay(
+        checks.filter(c => !c.file.exists || c.changed).toList
+      )
 
     // delete the stale data before adding anything new
     // returns number of rows deleted
     def deleteReferences(
       checks: List[FileCheck]
-    )(implicit S: Strategy): Task[Int] = {
-      log.debug(s"removing ${checks.size} stale files from the index")
-      deleteInBatches(checks.map(_.file))
-    }
+    )(implicit S: Strategy): Task[Int] =
+      for {
+        _ <- Task.delay(
+              log.debug(s"removing ${checks.size} stale files from the index")
+            )
+        deleted <- deleteInBatches(checks.map(_.file))
+      } yield deleted
 
     // a snapshot of everything that we want to index
-    def findBases(): (Set[FileObject], Map[FileName, Set[FileObject]]) = {
-      val (jarFiles, dirs) = config.projects.flatMap {
-        case m =>
-          m.targets
-            .map(_.file.toFile)
-            .filter(_.exists())
-            .toList ::: m.libraryJars.toList.map(_.file.toFile)
-      }.partition(_.isJar)
-      val grouped = dirs
-        .map(d => scanGrouped(vfs.vfile(d)))
-        .fold(Map.empty[FileName, Set[FileObject]])(_ merge _)
-      val jars: Set[FileObject] =
-        (jarFiles ++ EnsimeConfigProtocol.javaRunTime(config))
-          .map(vfs.vfile)(collection.breakOut)
-      (jars, grouped)
-    }
+    def findBases(): Task[(Set[FileObject], Map[FileName, Set[FileObject]])] =
+      for {
+        partitioned <- Task.delay {
+                        config.projects.flatMap {
+                          case m =>
+                            m.targets
+                              .map(_.file.toFile)
+                              .filter(_.exists())
+                              .toList ::: m.libraryJars.toList.map(
+                              _.file.toFile
+                            )
+                        }.partition(_.isJar)
+                      }
+
+        (jarFiles, dirs) = partitioned
+
+        grouped <- Task
+                    .traverse(dirs) { d =>
+                      scanGrouped(vfs.vfile(d))
+                    }
+                    .map(
+                      _.fold(Map.empty[FileName, Set[FileObject]])(_ merge _)
+                    )
+
+        jars <- Task.delay {
+                 (jarFiles ++ EnsimeConfigProtocol.javaRunTime(config))
+                   .map(vfs.vfile)(collection.breakOut)
+                   .toSet
+               }
+      } yield (jars, grouped)
 
     def indexBase(
       baseName: FileName,
@@ -200,13 +214,14 @@ class SearchService(
     }
 
     // index all the given bases and return number of rows written
-    def indexBases(files: (Set[FileObject], Map[FileName, Set[FileObject]]),
+    def indexBases(jars: Set[FileObject],
+                   classFiles: Map[FileName, Set[FileObject]],
                    checks: Seq[FileCheck]): Task[Int] = {
-      val (jars, classFiles) = files
       log.debug("Indexing bases...")
 
       val checksLookup: Map[String, FileCheck] =
         checks.map(check => (check.filename -> check)).toMap
+
       val jarsWithChecks = jars.map { jar =>
         val name = jar.getName
         (name, checksLookup.get(jar.uriString))
@@ -217,28 +232,27 @@ class SearchService(
           (outerClassFile, checksLookup.get(outerClassFile.uriString))
       }(collection.breakOut)
 
-      (jarsWithChecks ++ basesWithChecks)
-        .grouped(serverConfig.indexBatchSize)
-        .foldLeft(Task.now(0)) { (indexedCount, batch) =>
-          for {
-            c <- indexedCount
-            b <- Task
-                  .traverse(batch.toSeq) {
-                    case (file, check) => indexBase(file, check, classFiles)
-                  }
-                  .map(_.sum)
-          } yield c + b
+      val indexingTasks =
+        Stream.emits((jarsWithChecks ++ basesWithChecks).toSeq).map {
+          case (file, check) => Stream.eval(indexBase(file, check, classFiles))
         }
+
+      fs2.concurrent
+        .join(serverConfig.indexBatchSize)(indexingTasks)
+        .runFold(0)(_ + _)
     }
 
-    // chain together all the tasks
     for {
-      checks  <- Task.fromFuture(db.knownFiles())
-      stale   = findStaleFileChecks(checks)
-      deletes <- deleteReferences(stale)
-      bases   = findBases()
-      added   <- indexBases(bases, checks)
-      _       <- Task.fromFuture(index.commit())
+      checks <- Task.fromFuture(db.knownFiles())
+      deletes <- Stream
+                  .eval(findStaleFileChecks(checks))
+                  .flatMap(Stream.emits(_).chunkN(serverConfig.indexBatchSize))
+                  .evalMap(chunks => deleteReferences(chunks.flatMap(_.toList)))
+                  .runFold(0)(_ + _)
+      bases              <- findBases()
+      (jars, classFiles) = bases
+      added              <- indexBases(jars, classFiles, checks)
+      _                  <- Task.fromFuture(index.commit())
     } yield (deletes, added)
   }
 
@@ -260,23 +274,45 @@ class SearchService(
     file: FileObject,
     grouped: Map[FileName, Set[FileObject]]
   ): Task[List[SourceSymbolInfo]] =
-    Task.delay {
-      file match {
-        case classfile if classfile.getName.getExtension == "class" =>
-          // too noisy to log
-          val files = grouped(classfile.getName)
-          try extractSymbols(classfile, files, classfile)
-          finally { files.foreach(_.close()); classfile.close() }
-        case jar =>
-          log.debug(s"indexing $jar")
-          val vJar = vfs.vjar(jar.asLocalFile)
-          try {
-            (scanGrouped(vJar) flatMap {
-              case (root, files) =>
-                extractSymbols(jar, files, vfs.vfile(root.uriString))
-            }).toList
-          } finally { vfs.nuke(vJar) }
-      }
+    file match {
+      case classfile if classfile.getName.getExtension == "class" =>
+        Stream
+          .bracket(Task.now((grouped(classfile.getName), classfile)))(
+            {
+              case (files, classfile) =>
+                Stream.eval(extractSymbols(classfile, files, classfile))
+            }, {
+              case (files, classfile) =>
+                Task.delay {
+                  files.foreach(_.close())
+                  classfile.close()
+                }
+            }
+          )
+          .runFold(List.empty[SourceSymbolInfo])(_ ++ _)
+
+      case jar =>
+        for {
+          _ <- Task.delay(log.debug(s"indexing $jar"))
+          symbols <- Stream
+                      .bracket(Task.delay(vfs.vjar(jar.asLocalFile)))(
+                        vJar =>
+                          Stream
+                            .eval(scanGrouped(vJar))
+                            .evalMap { map =>
+                              Task
+                                .traverse(map.toSeq) {
+                                  case (root, files) =>
+                                    extractSymbols(jar,
+                                                   files,
+                                                   vfs.vfile(root.uriString))
+                                }
+                                .map(_.flatten.toList)
+                          },
+                        vJar => Task.delay(vfs.nuke(vJar))
+                      )
+                      .runFold(List.empty[SourceSymbolInfo])(_ ++ _)
+        } yield symbols
     }
 
   private val blacklist = Set("sun/", "sunw/", "com/sun/")
@@ -286,7 +322,7 @@ class SearchService(
     container: FileObject,
     files: collection.Set[FileObject],
     rootClassFile: FileObject
-  ): List[SourceSymbolInfo] = {
+  ): Task[List[SourceSymbolInfo]] = Task.delay {
     def getInternalRefs(isUserFile: Boolean,
                         s: RawSymbol): List[FullyQualifiedReference] =
       if (isUserFile && !noReverseLookups) s.internalRefs else List.empty

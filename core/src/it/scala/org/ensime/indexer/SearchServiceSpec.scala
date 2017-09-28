@@ -3,6 +3,7 @@
 package org.ensime.indexer
 
 import org.apache.lucene.search.DisjunctionMaxQuery
+import fs2.Strategy
 
 import scala.concurrent._
 import scala.concurrent.duration._
@@ -66,11 +67,11 @@ class SearchServiceSpec
         (config.projects.head.targets.head.file / "org/example/Foo$.class").toFile
 
       classfile shouldBe 'exists
-      service.findUnique("org.example.Foo$") shouldBe defined
+      service.findUnique("org.example.Foo$").unsafeRun() shouldBe defined
 
       classfile.delete()
       refresh() shouldBe ((1, 0))
-      service.findUnique("org.example.Foo$") shouldBe empty
+      service.findUnique("org.example.Foo$").unsafeRun() shouldBe empty
     }
   }
 
@@ -211,7 +212,7 @@ class SearchServiceSpec
           )
       }
 
-      val bazHits = service.searchClasses("Baz", 10).map(_.fqn)
+      val bazHits = service.searchClasses("Baz", 10).unsafeRun().map(_.fqn)
       bazHits should contain theSameElementsAs (
         Seq(
           "org.example2.Baz",
@@ -224,14 +225,15 @@ class SearchServiceSpec
       )
       bazHits should be(sorted)
 
-      val matchersHits = service.searchClasses("Matchers", 25).map(_.fqn)
+      val matchersHits =
+        service.searchClasses("Matchers", 25).unsafeRun().map(_.fqn)
       matchersHits.take(2) should contain theSameElementsAs Seq(
         "org.scalatest.Matchers",
         "org.scalatest.Matchers$"
       )
       matchersHits should be(sorted)
 
-      val regexHits = service.searchClasses("Regex", 8).map(_.fqn)
+      val regexHits = service.searchClasses("Regex", 8).unsafeRun().map(_.fqn)
       regexHits.take(2) should contain theSameElementsAs Seq(
         "scala.util.matching.Regex",
         "scala.util.matching.Regex$"
@@ -241,24 +243,28 @@ class SearchServiceSpec
 
   it should "return user created classes first" in withSearchService {
     implicit service =>
-      val hits = service.searchClasses("File", 10).map(_.fqn)
+      val hits = service.searchClasses("File", 10).unsafeRun().map(_.fqn)
       hits.head should startWith("org.boost.File")
 
-      val hits2 = service.searchClasses("Function1", 25).map(_.fqn)
+      val hits2 = service.searchClasses("Function1", 25).unsafeRun().map(_.fqn)
       hits2.head should startWith("org.boost.Function1")
   }
 
   it should "return user methods first" in withSearchService {
     implicit service =>
-      val hits = service.searchClassesMethods("toString" :: Nil, 8).map(_.fqn)
+      val hits = service
+        .searchClassesMethods("toString" :: Nil, 8)
+        .unsafeRun()
+        .map(_.fqn)
       all(hits) should startWith regex ("org.example|org.boost")
   }
 
   it should "distinguish between traits/classes/objects" in withSearchService {
     implicit service =>
-      val aTrait   = service.findUnique("org.scalatest.FunSuiteLike")
-      val aClass   = service.findUnique("org.scalatest.FunSuite")
-      val anObject = service.findUnique("org.scalatest.SuperEngine$Bundle$")
+      val aTrait = service.findUnique("org.scalatest.FunSuiteLike").unsafeRun()
+      val aClass = service.findUnique("org.scalatest.FunSuite").unsafeRun()
+      val anObject =
+        service.findUnique("org.scalatest.SuperEngine$Bundle$").unsafeRun()
       aTrait.value.toSearchResult should startWith("Trait")
       aClass.value.toSearchResult should startWith("Class")
       anObject.value.toSearchResult should startWith("Object")
@@ -266,21 +272,23 @@ class SearchServiceSpec
 
   it should "find scala names for scala symbols" in withSearchService {
     implicit service =>
-      val hits = service.searchClassesMethods(List("TestSuite"), 10)
+      val hits = service.searchClassesMethods(List("TestSuite"), 10).unsafeRun()
       hits should be('nonEmpty)
       all(hits.map(_.scalaName)) shouldBe defined
   }
 
   it should "not find scala names for java symbols" in withSearchService {
     implicit service =>
-      val hits = service.searchClasses("java.lang", 10)
+      val hits = service.searchClasses("java.lang", 10).unsafeRun()
       hits.length should ===(10)
       all(hits.map(_.scalaName)) shouldBe empty
   }
 
   "exact searches" should "find type aliases" in withSearchService {
     implicit service =>
-      service.findUnique("org.scalatest.fixture.ConfigMapFixture$FixtureParam") shouldBe defined
+      service
+        .findUnique("org.scalatest.fixture.ConfigMapFixture$FixtureParam")
+        .unsafeRun() shouldBe defined
   }
 
   "class hierarchy viewer" should "find all classes implementing a trait" in withSearchService {
@@ -396,6 +404,7 @@ class SearchServiceSpec
     implicit service =>
       val hits = service
         .searchClassesMethods(List("Overloads", "foo"), 100)
+        .unsafeRun()
         .filter(
           hit =>
             hit.declAs == DeclaredAs.Method && hit.fqn.contains("Overloads.foo")
@@ -435,7 +444,7 @@ class SearchServiceSpec
       val jdksrc = config.javaSources.head.file
       val query  = ArchiveFile(jdksrc, "/java/lang/String.java").canon
 
-      val hits = search.findClasses(query)
+      val hits = search.findClasses(query).unsafeRun()
 
       hits.head.fqn shouldBe "java.lang.String"
       hits.head.jdi.value shouldBe "java/lang/String.java"
@@ -445,30 +454,32 @@ class SearchServiceSpec
     (config, search) =>
       search
         .findClasses("java/lang/String.java")
+        .unsafeRun()
         .head
         .fqn shouldBe "java.lang.String"
 
       search
         .findClasses("bad/convention/bad-convention.scala")
+        .unsafeRun()
         .head
         .source
         .value should endWith("/src/main/scala/bad-convention.scala")
   }
-
 }
 
 object SearchServiceTestUtils {
 
-  def refresh()(implicit service: SearchService): (Int, Int) =
-    Await.result(service.refresh(), Duration.Inf)
+  def refresh()(implicit service: SearchService,
+                strategy: Strategy): (Int, Int) =
+    Await.result(service.refresh().unsafeRunAsyncFuture(), Duration.Inf)
 
   def searchClasses(
     expect: String,
     query: String
-  )(implicit service: SearchService, p: Position) = {
+  )(implicit service: SearchService, p: Position, strategy: Strategy) = {
     val max     = 10
     val info    = s"'$query' expected '$expect'"
-    val results = service.searchClasses(query, max)
+    val results = service.searchClasses(query, max).unsafeRun()
 
     withClue(s"${results.size} $info")(results.size should be <= max)
     withClue(s"$info but was empty")(results should not be empty)
@@ -482,16 +493,16 @@ object SearchServiceTestUtils {
   def searchesClasses(
     expect: String,
     queries: String*
-  )(implicit service: SearchService, p: Position) =
+  )(implicit service: SearchService, p: Position, s: Strategy) =
     (expect :: queries.toList).foreach(searchClasses(expect, _))
 
   def searchClassesAndMethods(
     expect: String,
     query: String
-  )(implicit service: SearchService, p: Position) = {
+  )(implicit service: SearchService, p: Position, s: Strategy) = {
     val max     = 10
     val info    = s"'$query' expected '$expect')"
-    val results = service.searchClassesMethods(List(query), max)
+    val results = service.searchClassesMethods(List(query), max).unsafeRun()
     withClue(s"${results.size} $info")(results.size should be <= max)
     withClue(s"$info but was empty")(results should not be empty)
     // when we improve the search quality, we could
@@ -501,16 +512,18 @@ object SearchServiceTestUtils {
     results
   }
 
-  def searchExpectEmpty(query: String)(implicit service: SearchService,
-                                       p: Position) = {
+  def searchExpectEmpty(
+    query: String
+  )(implicit service: SearchService, p: Position, s: Strategy) = {
     val max     = 1
-    val results = service.searchClassesMethods(List(query), max)
+    val results = service.searchClassesMethods(List(query), max).unsafeRun()
     withClue(s"expected empty results from $query")(results shouldBe empty)
     results
   }
 
-  def searchesEmpty(queries: String*)(implicit service: SearchService,
-                                      p: Position) =
+  def searchesEmpty(
+    queries: String*
+  )(implicit service: SearchService, p: Position, strategy: Strategy) =
     queries.toList.foreach(searchExpectEmpty)
 
   // doesn't assert that expect finds itself because the lucene query
@@ -518,15 +531,20 @@ object SearchServiceTestUtils {
   def searchesMethods(
     expect: String,
     queries: String*
-  )(implicit service: SearchService, p: Position) =
+  )(implicit service: SearchService, p: Position, strategy: Strategy) =
     (queries.toList).foreach(searchClassesAndMethods(expect, _))
 
   def getClassHierarchy(
     fqn: String,
     hierarchyType: Hierarchy.Direction
-  )(implicit service: SearchService, p: Position): Hierarchy = {
+  )(implicit service: SearchService,
+    p: Position,
+    strategy: Strategy): Hierarchy = {
     val hierarchy =
-      Await.result(service.getTypeHierarchy(fqn, hierarchyType), Duration.Inf)
+      Await.result(
+        service.getTypeHierarchy(fqn, hierarchyType).unsafeRunAsyncFuture(),
+        Duration.Inf
+      )
     withClue(s"No class hierarchy found for fqn = $fqn")(
       hierarchy shouldBe defined
     )
@@ -541,8 +559,10 @@ object SearchServiceTestUtils {
 
   def findUsages(
     fqn: String
-  )(implicit service: SearchService): List[FqnSymbol] =
-    Await.result(service.findUsages(fqn), Duration.Inf).toList
+  )(implicit service: SearchService, strategy: Strategy): List[FqnSymbol] =
+    Await
+      .result(service.findUsages(fqn).unsafeRunAsyncFuture(), Duration.Inf)
+      .toList
 
   // 2.10 scalap has slightly different formatting for method names
   def unifyMethodName(s: String): String = s.replaceAll(" : ", ": ")

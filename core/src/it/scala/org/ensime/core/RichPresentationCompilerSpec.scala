@@ -2,6 +2,7 @@
 // License: http://www.gnu.org/licenses/gpl-3.0.en.html
 package org.ensime.core
 
+import fs2.Strategy
 import java.io.File
 
 import scala.collection.immutable.Queue
@@ -27,13 +28,16 @@ class RichPresentationCompilerThatNeedsJavaLibsSpec
     with ReallyRichPresentationCompilerFixture {
 
   val original = EnsimeConfigFixture.SimpleTestProject
+  implicit val strategy: Strategy = Strategy.fromExecutionContext(
+    scala.concurrent.ExecutionContext.Implicits.global
+  )
 
   "RichPresentationCompiler" should "locate source position of Java classes in import statements" in {
     withPresCompiler { (config, cc) =>
       import ReallyRichPresentationCompilerFixture._
 
       cc.search.refreshResolver()
-      refresh()(cc.search)
+      refresh()(cc.search, strategy)
 
       runForPositionInCompiledSource(config,
                                      cc,
@@ -65,6 +69,7 @@ class RichPresentationCompilerSpec
 
   // Completion requests need an ExecutionContext
   import scala.concurrent.ExecutionContext.Implicits.global
+  implicit val strategy: Strategy = Strategy.fromExecutionContext(global)
 
   "RichPresentationCompiler" should "get symbol info with cursor immediately after and before symbol" in {
     withPresCompiler { (config, cc) =>
@@ -90,7 +95,7 @@ class RichPresentationCompilerSpec
       import ReallyRichPresentationCompilerFixture._
 
       cc.search.refreshResolver()
-      refresh()(cc.search)
+      refresh()(cc.search, strategy)
 
       runForPositionInCompiledSource(config,
                                      cc,
@@ -551,7 +556,8 @@ class RichPresentationCompilerSpec
       )
 
       cc.search.refreshResolver()
-      Await.result(cc.search.refresh(), 30.seconds * spanScaleFactor)
+      Await.result(cc.search.refresh().unsafeRunAsyncFuture(),
+                   30.seconds * spanScaleFactor)
 
       val scalaVersion = scala.util.Properties.versionNumberString
       val parts        = scalaVersion.split("\\.").take(2).map { _.toInt }

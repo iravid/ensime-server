@@ -2,6 +2,7 @@
 // License: http://www.gnu.org/licenses/gpl-3.0.en.html
 package org.ensime.fixture
 
+import fs2.Strategy
 import scala.concurrent._
 import scala.concurrent.duration._
 import scala.util.Try
@@ -20,11 +21,14 @@ trait IsolatedSearchServiceFixture
     testCode: (EnsimeConfig, SearchService) => Any
   )(implicit actorSystem: ActorSystem, vfs: EnsimeVFS): Any =
     withSourceResolver { (config, resolver) =>
+      implicit val strategy =
+        Strategy.fromExecutionContext(actorSystem.dispatcher)
       val searchService = new SearchService(config, resolver)
       try {
         testCode(config, searchService)
       } finally {
-        Await.ready(searchService.shutdown(), Duration.Inf)
+        Await.ready(searchService.shutdown().unsafeRunAsyncFuture(),
+                    Duration.Inf)
         Try(actorSystem.terminate())
         Try(Await.result(actorSystem.whenTerminated, 10.seconds))
       }
@@ -37,6 +41,8 @@ trait SharedSearchServiceFixture
   this: SharedTestKitFixture =>
 
   private[fixture] var _search: SearchService = _
+  implicit def strategy: Strategy =
+    Strategy.fromExecutionContext(_testkit.system.dispatcher)
 
   override def beforeAll(): Unit = {
     super.beforeAll()
@@ -45,7 +51,7 @@ trait SharedSearchServiceFixture
   }
 
   override def afterAll(): Unit = {
-    Await.ready(_search.shutdown(), Duration.Inf)
+    Await.ready(_search.shutdown().unsafeRunAsyncFuture(), Duration.Inf)
     super.afterAll()
   }
 
