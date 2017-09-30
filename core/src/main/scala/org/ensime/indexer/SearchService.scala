@@ -2,16 +2,14 @@
 // License: http://www.gnu.org/licenses/gpl-3.0.en.html
 package org.ensime.indexer
 
-import fs2.{ Strategy, Stream, Task }
 import java.net.URI
-import org.ensime.util.Debouncer
 import scala.concurrent._
 import scala.concurrent.duration._
-import scala.util.{ Failure, Properties, Success }
 import scala.collection.{ mutable, Map, Set }
+import scala.util.Properties
 
-import akka.actor._
 import akka.event.slf4j.SLF4JLogging
+import fs2.{ Strategy, Stream, Task }
 import org.apache.commons.vfs2._
 import org.ensime.api._
 import org.ensime.config.EnsimeConfigProtocol
@@ -564,60 +562,19 @@ object SearchService {
 object IndexStream extends SLF4JLogging {
   import fs2._
 
-  def fileListener(queue: async.mutable.Queue[Task, IndexFile]) =
+  def fileListener(queue: async.mutable.Queue[Task, FileObject]) =
     new FileChangeListener {
-      def fileChanged(f: FileObject): Unit = {
-        queue.enqueue1(IndexFile(f)).unsafeRun()
-        println(s"File ${f} enqueued")
-      }
+      def fileChanged(f: FileObject): Unit = queue.enqueue1(f).unsafeRun()
       def fileRemoved(f: FileObject): Unit = fileChanged(f)
       def fileAdded(f: FileObject): Unit   = fileChanged(f)
     }
 
-  def debouncedScan[S, A](initial: S)(update: (S, A) => S)(
-    schedule: Stream[Task, Unit]
-  )(implicit strategy: fs2.Strategy): Pipe[Task, A, S] = {
-    def go(curr: S)(data: Handle[Task, A],
-                    heartbeat: Handle[Task, Unit]): Pull[Task, S, Unit] =
-      for {
-        _            <- Pull.eval(Task.delay(log.debug("Entering loop")))
-        dataSeg      <- data.awaitAsync
-        heartbeatSeg <- heartbeat.awaitAsync
-        raceResult   <- (dataSeg race heartbeatSeg).pull
-        _ <- raceResult match {
-              case Left(dataPull) =>
-                for {
-                  (chunk, data) <- dataPull
-                  _ <- Pull.eval(
-                        Task.delay(println("Message received from queue"))
-                      )
-
-                  _ <- go(chunk.foldLeft(curr)(update))(data, heartbeat)
-                } yield ()
-
-              case Right(heartbeatPull) =>
-                for {
-                  (_, heartbeat) <- heartbeatPull
-                  _ <- Pull.eval(
-                        Task.delay(println("Debounce duration ended"))
-                      )
-                  _             <- Pull.output1(curr)
-                  dataPull      <- dataSeg.pull.flatMap(identity)
-                  (chunk, data) = dataPull
-                  _             <- go(chunk.foldLeft(initial)(update))(data, heartbeat)
-                } yield ()
-            }
-      } yield ()
-
-    _.pull2(schedule)((data, heartbeat) => go(initial)(data, heartbeat))
-  }
-
   def updateTodoMap(searchService: SearchService,
                     todo: Map[FileName, Set[FileObject]],
-                    indexFile: IndexFile): Map[FileName, Set[FileObject]] = {
+                    indexFile: FileObject): Map[FileName, Set[FileObject]] = {
     val topLevelClassFile = indexFile match {
-      case IndexFile(jar) if jar.getName.getExtension == "jar" => jar
-      case IndexFile(classFile)                                => searchService.getTopLevelClassFile(classFile)
+      case jar if jar.getName.getExtension == "jar" => jar
+      case classFile                                => searchService.getTopLevelClassFile(classFile)
     }
 
     todo + (topLevelClassFile.getName -> (todo.getOrElse(
@@ -679,15 +636,15 @@ object IndexStream extends SLF4JLogging {
   }
 
   def apply(searchService: SearchService, concurrency: Int)(
-    implicit scheduler: fs2.Scheduler,
-    strategy: fs2.Strategy
+    implicit scheduler: Scheduler,
+    strategy: Strategy
   ): Task[
-    (async.mutable.Queue[Task, IndexFile],
+    (async.mutable.Queue[Task, FileObject],
      async.mutable.Signal[Task, Boolean],
      Stream[Task, Unit])
   ] =
     for {
-      queue            <- async.unboundedQueue[Task, IndexFile]
+      queue            <- async.unboundedQueue[Task, FileObject]
       interruptSignal  <- async.signalOf[Task, Boolean](false)
       dequeueStream    = queue.dequeue.map(Right(_))
       debounceSchedule = time.awakeEvery[Task](5.seconds).map(_ => Left(()))
@@ -714,115 +671,4 @@ object IndexStream extends SLF4JLogging {
         }
     } yield (queue, interruptSignal, stream)
 
-}
-
-final case class IndexFile(f: FileObject)
-
-class IndexingQueueActor(searchService: SearchService)
-    extends Actor
-    with ActorLogging {
-  import scala.concurrent.duration._
-  implicit val S: Strategy = Strategy.fromExecutionContext(context.dispatcher)
-
-  case object Process
-
-  // De-dupes files that have been updated since we were last told to
-  // index them. No need to aggregate values: the latest wins. Key is
-  // the URI because FileObject doesn't implement equals
-  private val todo = new mutable.HashMap[FileName, mutable.Set[FileObject]]
-  with mutable.MultiMap[FileName, FileObject]
-
-  private val advice =
-    "If the problem persists, you may need to restart ensime."
-
-  val processDebounce =
-    Debouncer.forActor(self, Process, delay = 5.seconds, maxDelay = 1.hour)
-
-  override def receive: Receive = {
-    case IndexFile(f) =>
-      val topLevelClassFile = f match {
-        case jar if jar.getName.getExtension == "jar" => jar
-        case classFile                                => searchService.getTopLevelClassFile(classFile)
-      }
-      todo.addBinding(topLevelClassFile.getName, topLevelClassFile)
-      processDebounce.call()
-
-    case Process if todo.isEmpty => // nothing to do
-
-    case Process =>
-      val batch = todo.take(250)
-      batch.keys.foreach(todo.remove)
-      if (todo.nonEmpty)
-        processDebounce.call()
-
-      import ExecutionContext.Implicits.global
-
-      log.debug(s"Indexing ${batch.size} groups of files")
-
-      def retry(): Unit =
-        batch.valuesIterator.foreach(_.foreach(self ! IndexFile(_)))
-
-      batch
-        .grouped(10)
-        .foreach(
-          chunk =>
-            Future
-              .sequence(chunk.map {
-                case (outerClassFile, _) =>
-                  val filename = outerClassFile.getPath
-                  // I don't trust VFS's f.exists()
-                  if (!File(filename).exists()) {
-                    Future.successful(outerClassFile -> Nil)
-                  } else
-                    searchService
-                      .extractSymbolsFromClassOrJar(
-                        searchService.vfs.vfile(outerClassFile.uriString),
-                        batch
-                      )
-                      .map(outerClassFile ->)
-                      .unsafeRunAsyncFuture()
-              })
-              .onComplete {
-                case Failure(t) =>
-                  log.error(
-                    t,
-                    s"failed to index batch of ${batch.size} files. $advice"
-                  )
-                  retry()
-                case Success(indexed) =>
-                  searchService
-                    .delete(
-                      indexed.flatMap(f => batch(f._1))(collection.breakOut)
-                    )
-                    .unsafeRunAsyncFuture()
-                    .onComplete {
-                      case Failure(t) =>
-                        log.error(
-                          t,
-                          s"failed to remove stale entries in ${batch.size} files. $advice"
-                        )
-                        retry()
-                      case Success(_) =>
-                        indexed.foreach {
-                          case (file, syms) =>
-                            val boost = searchService.isUserFile(file)
-                            val persisting = searchService
-                              .persist(syms, commitIndex = true, boost = boost)
-                              .unsafeRunAsyncFuture()
-
-                            persisting.onComplete {
-                              case Failure(t) =>
-                                log.error(
-                                  t,
-                                  s"failed to persist entries in $file. $advice"
-                                )
-                                retry()
-                              case Success(_) =>
-                            }
-                        }
-                    }
-
-            }
-        )
-  }
 }
