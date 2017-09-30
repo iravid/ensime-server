@@ -301,18 +301,19 @@ class SearchService(
           symbols <- Stream
                       .bracket(Task.delay(vfs.vjar(jar.asLocalFile)))(
                         vJar =>
-                          Stream
-                            .eval(scanGrouped(vJar))
-                            .evalMap { map =>
-                              Task
-                                .traverse(map.toSeq) {
-                                  case (root, files) =>
-                                    extractSymbols(jar,
-                                                   files,
-                                                   vfs.vfile(root.uriString))
-                                }
-                                .map(_.flatten.toList)
-                          },
+                          Stream.eval {
+                            for {
+                              grouped <- scanGrouped(vJar)
+                              symbols <- Task.traverse(grouped.toSeq) {
+                                          case (root, files) =>
+                                            extractSymbols(
+                                              jar,
+                                              files,
+                                              vfs.vfile(root.uriString)
+                                            )
+                                        }
+                            } yield symbols.flatten.toList
+                        },
                         vJar => Task.delay(vfs.nuke(vJar))
                       )
                       .runFold(List.empty[SourceSymbolInfo])(_ ++ _)
