@@ -504,6 +504,8 @@ class SearchService(
     val dwork = Task.fromFuture(db.removeFiles(files))
 
     for {
+      iwork    <- Task.start(iwork)
+      dwork    <- Task.start(dwork)
       _        <- iwork
       removals <- dwork
     } yield removals
