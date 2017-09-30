@@ -281,7 +281,7 @@ class SearchService(
     file match {
       case classfile if classfile.getName.getExtension == "class" =>
         Stream
-          .bracket(Task.now((grouped(classfile.getName), classfile)))(
+          .bracket(Task.delay((grouped(classfile.getName), classfile)))(
             {
               case (files, classfile) =>
                 Stream.eval(extractSymbols(classfile, files, classfile))
