@@ -561,6 +561,9 @@ object SearchService {
 
 object IndexStream extends SLF4JLogging {
   import fs2._
+  case class Control(inputQueue: async.mutable.Queue[Task, FileObject],
+                     shutdownSignal: async.mutable.Signal[Task, Boolean],
+                     streamCompletion: Task[Unit])
 
   def fileListener(queue: async.mutable.Queue[Task, FileObject]) =
     new FileChangeListener {
@@ -638,37 +641,46 @@ object IndexStream extends SLF4JLogging {
   def apply(searchService: SearchService, concurrency: Int)(
     implicit scheduler: Scheduler,
     strategy: Strategy
-  ): Task[
-    (async.mutable.Queue[Task, FileObject],
-     async.mutable.Signal[Task, Boolean],
-     Stream[Task, Unit])
-  ] =
+  ): Task[Control] =
     for {
-      queue            <- async.unboundedQueue[Task, FileObject]
+      inputQueue       <- async.unboundedQueue[Task, FileObject]
       interruptSignal  <- async.signalOf[Task, Boolean](false)
-      dequeueStream    = queue.dequeue.map(Right(_))
+      dequeueStream    = inputQueue.dequeue.map(Right(_))
       debounceSchedule = time.awakeEvery[Task](5.seconds).map(_ => Left(()))
       interleaved      = dequeueStream.merge(debounceSchedule)
-      stream = interleaved
-        .mapAccumulate(Map[FileName, Set[FileObject]]()) { (state, msg) =>
-          msg match {
-            case Left(_)  => (Map.empty, Some(state))
-            case Right(f) => (updateTodoMap(searchService, state, f), None)
-          }
-        }
-        .map(_._2)
-        .unNone
-        .evalMap(updateIndices(searchService, _, concurrency))
-        .interruptWhen(interruptSignal)
-        .onError { e =>
-          Stream
-            .eval(
-              Task
-                .delay(log.error("Error caught in indexing stream", e))
-                .flatMap(_ => Task.now(Stream.empty))
-            )
-            .flatMap(identity)
-        }
-    } yield (queue, interruptSignal, stream)
+      streamCompletion <- Task.start {
+                           interleaved
+                             .mapAccumulate(Map[FileName, Set[FileObject]]()) {
+                               (state, msg) =>
+                                 msg match {
+                                   case Left(_) => (Map.empty, Some(state))
+                                   case Right(f) =>
+                                     (updateTodoMap(searchService, state, f),
+                                      None)
+                                 }
+                             }
+                             .map(_._2)
+                             .unNone
+                             .evalMap(
+                               updateIndices(searchService, _, concurrency)
+                             )
+                             .interruptWhen(interruptSignal)
+                             .onError { e =>
+                               Stream
+                                 .eval(
+                                   Task
+                                     .delay(
+                                       log.error(
+                                         "Error caught in indexing stream",
+                                         e
+                                       )
+                                     )
+                                     .flatMap(_ => Task.now(Stream.empty))
+                                 )
+                                 .flatMap(identity)
+                             }
+                             .run
+                         }
+    } yield Control(inputQueue, interruptSignal, streamCompletion)
 
 }

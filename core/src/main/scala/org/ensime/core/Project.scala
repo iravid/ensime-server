@@ -51,9 +51,10 @@ class Project(
   private implicit val vfs: EnsimeVFS = EnsimeVFS()
   private val resolver                = new SourceResolver(config)
   private val searchService           = new SearchService(config, resolver)
-  private val (indexingQueue, indexInterruptSignal, indexingStream) =
+  private val indexStreamControl =
     IndexStream(searchService, 250).unsafeRun()
-  private val indexingListener = IndexStream.fileListener(indexingQueue)
+  private val indexingListener =
+    IndexStream.fileListener(indexStreamControl.inputQueue)
 
   private var dependentProjects: Map[EnsimeProjectId, List[EnsimeProjectId]] = _
 
@@ -106,8 +107,6 @@ class Project(
           throw problem
       }(context.dispatcher)
 
-    indexingStream.run.unsafeRunAsyncFuture()
-
     indexer = context.actorOf(Indexer(searchService), "indexer")
     if (config.scalaLibrary.isDefined || Set("scala", "dotty")(config.name)) {
       scalac = context.actorOf(
@@ -138,7 +137,7 @@ class Project(
 
   override def postStop(): Unit = {
     // make sure the "reliable" dependencies are cleaned up
-    Try(indexInterruptSignal.set(true).unsafeRun())
+    Try(indexStreamControl.shutdownSignal.set(true).unsafeRun())
     Try(searchService.shutdown().unsafeRun())
     Try(vfs.close())
   }
