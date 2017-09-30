@@ -579,6 +579,120 @@ object SearchService {
   }
 }
 
+object IndexStream {
+  import fs2._
+
+  def debouncedScan[S, A](initial: S)(update: (S, A) => S)(
+    schedule: Stream[Task, Unit]
+  )(implicit strategy: fs2.Strategy): Pipe[Task, A, S] = {
+    def go(curr: S)(data: Handle[Task, A],
+                    heartbeat: Handle[Task, Unit]): Pull[Task, S, Unit] =
+      for {
+        dataSeg      <- data.awaitAsync
+        heartbeatSeg <- heartbeat.awaitAsync
+        raceResult   <- (dataSeg race heartbeatSeg).pull
+        _ <- raceResult match {
+              case Left(dataPull) =>
+                for {
+                  (chunk, data) <- dataPull
+                  _             <- go(chunk.foldLeft(curr)(update))(data, heartbeat)
+                } yield ()
+
+              case Right(heartbeatPull) =>
+                for {
+                  (_, heartbeat) <- heartbeatPull
+                  _              <- Pull.output1(curr)
+                  _              <- go(initial)(data, heartbeat)
+                } yield ()
+            }
+      } yield ()
+
+    _.pull2(schedule)((data, heartbeat) => go(initial)(data, heartbeat))
+  }
+
+  def updateTodoMap(searchService: SearchService,
+                    todo: Map[FileName, Set[FileObject]],
+                    indexFile: IndexFile): Map[FileName, Set[FileObject]] = {
+    val topLevelClassFile = indexFile match {
+      case IndexFile(jar) if jar.getName.getExtension == "jar" => jar
+      case IndexFile(classFile)                                => searchService.getTopLevelClassFile(classFile)
+    }
+
+    todo + (topLevelClassFile.getName -> (todo.getOrElse(
+      topLevelClassFile.getName,
+      Set()
+    ) + topLevelClassFile))
+  }
+
+  def updateIndices(searchService: SearchService,
+                    todo: Map[FileName, Set[FileObject]],
+                    concurrency: Int)(implicit S: Strategy): Task[Unit] = {
+    val symbolExtraction = concurrent.join(concurrency) {
+      Stream.emits {
+        todo.toSeq.map {
+          case (outerClassFile, _) =>
+            val filename = outerClassFile.getPath
+            Stream.eval {
+              for {
+                exists <- Task.delay(File(filename).exists())
+                res <- if (!exists) Task.now(outerClassFile -> Nil)
+                      else
+                        searchService
+                          .extractSymbolsFromClassOrJar(
+                            searchService.vfs.vfile(outerClassFile.uriString),
+                            todo
+                          )
+                          .map(outerClassFile -> _)
+              } yield res
+            }
+        }
+      }
+    }
+
+    val indexing = concurrent.join(concurrency) {
+
+      symbolExtraction
+        .chunkLimit(concurrency)
+        .evalMap { chunk =>
+          val staleFileObjects = for {
+            (fileName, _) <- chunk.toList
+            fileObjects   <- todo.get(fileName).toList
+            fileObject    <- fileObjects.toList
+          } yield fileObject
+
+          searchService.delete(staleFileObjects).map(_ => chunk)
+        }
+        .flatMap(Stream.chunk)
+        .map {
+          case (file, syms) =>
+            Stream.eval {
+              searchService.persist(syms,
+                                    commitIndex = true,
+                                    boost = searchService.isUserFile(file))
+            }
+        }
+    }
+
+    indexing.run
+  }
+
+  def apply(searchService: SearchService, concurrency: Int)(
+    implicit scheduler: fs2.Scheduler,
+    strategy: fs2.Strategy
+  ): Stream[Task, Unit] =
+    for {
+      queue <- Stream.eval(async.unboundedQueue[Task, IndexFile])
+      _ <- queue.dequeue
+            .through(
+              debouncedScan(Map[FileName, Set[FileObject]]())(
+                updateTodoMap(searchService, _, (_: IndexFile))
+              )(time.awakeEvery[Task](5.seconds).map(_ => ()))
+            )
+            .evalMap(updateIndices(searchService, _, concurrency))
+    } yield ()
+
+}
+
 final case class IndexFile(f: FileObject)
 
 class IndexingQueueActor(searchService: SearchService)
@@ -688,5 +802,4 @@ class IndexingQueueActor(searchService: SearchService)
             }
         )
   }
-
 }
