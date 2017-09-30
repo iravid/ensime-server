@@ -32,6 +32,8 @@ object ProjectPlugin extends AutoPlugin {
     scalafmtConfig in ThisBuild := file("project/scalafmt.conf"),
     scalafmtVersion in ThisBuild := "1.3.0",
 
+    logBuffered in Test := true,
+
     sonatypeGithub := ("ensime", "ensime-server"),
     licenses := Seq(GPL3),
     startYear := Some(2010)
