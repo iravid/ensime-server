@@ -200,24 +200,25 @@ class SearchService(
       baseName: FileName,
       fileCheck: Option[FileCheck],
       grouped: Map[FileName, Set[FileObject]]
-    )(implicit S: Strategy): Task[Int] = {
-      val base      = vfs.vfile(baseName.uriString)
-      val outOfDate = fileCheck.forall(_.changed)
-      if (!outOfDate || !base.exists()) Task.now(0)
-      else {
-        val boost = isUserFile(baseName)
-
-        for {
-          symbols   <- extractSymbolsFromClassOrJar(base, grouped)
-          persisted <- persist(symbols, commitIndex = false, boost = boost)
-          _ <- Task.delay {
-                if (base.getName.getExtension == "jar") {
-                  log.debug(s"finished indexing $base")
-                }
-              }
-        } yield persisted
-      }
-    }
+    )(implicit S: Strategy): Task[Int] =
+      for {
+        base       <- Task.delay(vfs.vfile(baseName.uriString))
+        outOfDate  <- Task.delay(fileCheck.forall(_.changed))
+        irrelevant <- Task.delay(!outOfDate || !base.exists())
+        result <- if (irrelevant) Task.now(0)
+                 else
+                   for {
+                     symbols <- extractSymbolsFromClassOrJar(base, grouped)
+                     persisted <- persist(symbols,
+                                          commitIndex = false,
+                                          boost = isUserFile(baseName))
+                     _ <- Task.delay {
+                           if (base.getName.getExtension == "jar") {
+                             log.debug(s"finished indexing $base")
+                           }
+                         }
+                   } yield persisted
+      } yield result
 
     // index all the given bases and return number of rows written
     def indexBases(jars: Set[FileObject],
