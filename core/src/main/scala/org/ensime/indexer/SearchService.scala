@@ -36,11 +36,9 @@ class SearchService(
   resolver: SourceResolver
 )(
   implicit
-  actorSystem: ActorSystem,
   serverConfig: EnsimeServerConfig,
   val vfs: EnsimeVFS
-) extends FileChangeListener
-    with SLF4JLogging {
+) extends SLF4JLogging {
   import SearchService._
   import ExecutionContext.Implicits.global // not used for heavy lifting (indexing, graph or lucene)
 
@@ -482,18 +480,6 @@ class SearchService(
   def findClasses(jdi: String)(implicit S: Strategy): Task[Seq[ClassDef]] =
     Task.fromFuture(db.findClasses(jdi))
 
-  /* DELETE then INSERT in H2 is ridiculously slow, so we put all modifications
-   * into a blocking queue and dedicate a thread to block on draining the queue.
-   * This has the effect that we always react to a single change on disc but we
-   * will work through backlogs in bulk.
-   *
-   * We always do a DELETE, even if the entries are new, but only INSERT if
-   * the list of symbols is non-empty.
-   */
-
-  val backlogActor =
-    actorSystem.actorOf(Props(new IndexingQueueActor(this)), "ClassfileIndexer")
-
   // returns number of rows removed
   def delete(files: List[FileObject])(implicit S: Strategy): Task[Int] = {
     // this doesn't speed up Lucene deletes, but it means that we
@@ -508,10 +494,6 @@ class SearchService(
       removals <- dwork
     } yield removals
   }
-
-  def fileChanged(f: FileObject): Unit = backlogActor ! IndexFile(f)
-  def fileRemoved(f: FileObject): Unit = fileChanged(f)
-  def fileAdded(f: FileObject): Unit   = fileChanged(f)
 
   def shutdown()(implicit S: Strategy): Task[Unit] =
     for {
@@ -579,8 +561,18 @@ object SearchService {
   }
 }
 
-object IndexStream {
+object IndexStream extends SLF4JLogging {
   import fs2._
+
+  def fileListener(queue: async.mutable.Queue[Task, IndexFile]) =
+    new FileChangeListener {
+      def fileChanged(f: FileObject): Unit = {
+        queue.enqueue1(IndexFile(f)).unsafeRun()
+        println(s"File ${f} enqueued")
+      }
+      def fileRemoved(f: FileObject): Unit = fileChanged(f)
+      def fileAdded(f: FileObject): Unit   = fileChanged(f)
+    }
 
   def debouncedScan[S, A](initial: S)(update: (S, A) => S)(
     schedule: Stream[Task, Unit]
@@ -588,6 +580,7 @@ object IndexStream {
     def go(curr: S)(data: Handle[Task, A],
                     heartbeat: Handle[Task, Unit]): Pull[Task, S, Unit] =
       for {
+        _            <- Pull.eval(Task.delay(log.debug("Entering loop")))
         dataSeg      <- data.awaitAsync
         heartbeatSeg <- heartbeat.awaitAsync
         raceResult   <- (dataSeg race heartbeatSeg).pull
@@ -595,14 +588,23 @@ object IndexStream {
               case Left(dataPull) =>
                 for {
                   (chunk, data) <- dataPull
-                  _             <- go(chunk.foldLeft(curr)(update))(data, heartbeat)
+                  _ <- Pull.eval(
+                        Task.delay(println("Message received from queue"))
+                      )
+
+                  _ <- go(chunk.foldLeft(curr)(update))(data, heartbeat)
                 } yield ()
 
               case Right(heartbeatPull) =>
                 for {
                   (_, heartbeat) <- heartbeatPull
-                  _              <- Pull.output1(curr)
-                  _              <- go(initial)(data, heartbeat)
+                  _ <- Pull.eval(
+                        Task.delay(println("Debounce duration ended"))
+                      )
+                  _             <- Pull.output1(curr)
+                  dataPull      <- dataSeg.pull.flatMap(identity)
+                  (chunk, data) = dataPull
+                  _             <- go(chunk.foldLeft(initial)(update))(data, heartbeat)
                 } yield ()
             }
       } yield ()
@@ -679,17 +681,38 @@ object IndexStream {
   def apply(searchService: SearchService, concurrency: Int)(
     implicit scheduler: fs2.Scheduler,
     strategy: fs2.Strategy
-  ): Stream[Task, Unit] =
+  ): Task[
+    (async.mutable.Queue[Task, IndexFile],
+     async.mutable.Signal[Task, Boolean],
+     Stream[Task, Unit])
+  ] =
     for {
-      queue <- Stream.eval(async.unboundedQueue[Task, IndexFile])
-      _ <- queue.dequeue
-            .through(
-              debouncedScan(Map[FileName, Set[FileObject]]())(
-                updateTodoMap(searchService, _, (_: IndexFile))
-              )(time.awakeEvery[Task](5.seconds).map(_ => ()))
+      queue            <- async.unboundedQueue[Task, IndexFile]
+      interruptSignal  <- async.signalOf[Task, Boolean](false)
+      dequeueStream    = queue.dequeue.map(Right(_))
+      debounceSchedule = time.awakeEvery[Task](5.seconds).map(_ => Left(()))
+      interleaved      = dequeueStream.merge(debounceSchedule)
+      stream = interleaved
+        .mapAccumulate(Map[FileName, Set[FileObject]]()) { (state, msg) =>
+          msg match {
+            case Left(_)  => (Map.empty, Some(state))
+            case Right(f) => (updateTodoMap(searchService, state, f), None)
+          }
+        }
+        .map(_._2)
+        .unNone
+        .evalMap(updateIndices(searchService, _, concurrency))
+        .interruptWhen(interruptSignal)
+        .onError { e =>
+          Stream
+            .eval(
+              Task
+                .delay(log.error("Error caught in indexing stream", e))
+                .flatMap(_ => Task.now(Stream.empty))
             )
-            .evalMap(updateIndices(searchService, _, concurrency))
-    } yield ()
+            .flatMap(identity)
+        }
+    } yield (queue, interruptSignal, stream)
 
 }
 

@@ -33,6 +33,8 @@ class Project(
   import context.system
   implicit val strategy: Strategy =
     Strategy.fromExecutionContext(context.dispatcher)
+  implicit val scheduler: fs2.Scheduler =
+    fs2.Scheduler.fromFixedDaemonPool(4, "FS2Scheduler")
 
   /* The main components of the ENSIME server */
   private var scalac: ActorRef   = _
@@ -49,6 +51,9 @@ class Project(
   private implicit val vfs: EnsimeVFS = EnsimeVFS()
   private val resolver                = new SourceResolver(config)
   private val searchService           = new SearchService(config, resolver)
+  private val (indexingQueue, indexInterruptSignal, indexingStream) =
+    IndexStream(searchService, 250).unsafeRun()
+  private val indexingListener = IndexStream.fileListener(indexingQueue)
 
   private var dependentProjects: Map[EnsimeProjectId, List[EnsimeProjectId]] = _
 
@@ -78,7 +83,7 @@ class Project(
       askReTypeCheck.values.foreach(_.call())
   }
   context.actorOf(
-    Props(new ClassfileWatcher(searchService :: reTypecheck :: Nil)),
+    Props(new ClassfileWatcher(indexingListener :: reTypecheck :: Nil)),
     "classFileWatcher"
   )
 
@@ -86,6 +91,7 @@ class Project(
     dependentProjects = config.projects.map(
       p => p.id -> config.projects.filter(_.depends.contains(p.id)).map(_.id)
     )(collection.breakOut)
+
     searchService
       .refresh()
       .unsafeRunAsyncFuture()
@@ -100,6 +106,8 @@ class Project(
           throw problem
       }(context.dispatcher)
 
+    indexingStream.run.unsafeRunAsyncFuture()
+
     indexer = context.actorOf(Indexer(searchService), "indexer")
     if (config.scalaLibrary.isDefined || Set("scala", "dotty")(config.name)) {
       scalac = context.actorOf(
@@ -107,15 +115,19 @@ class Project(
                         Analyzer(broadcaster, indexer, searchService, _)),
         "scalac"
       )
-      javac = context.actorOf(JavaAnalyzer(broadcaster, indexer, searchService),
-                              "javac")
+      javac = context.actorOf(
+        JavaAnalyzer(broadcaster, indexer, searchService),
+        "javac"
+      )
     } else {
       log.warning(
         "Detected a pure Java project. Scala queries are not available."
       )
       scalac = system.deadLetters
-      javac = context.actorOf(JavaAnalyzer(broadcaster, indexer, searchService),
-                              "javac")
+      javac = context.actorOf(
+        JavaAnalyzer(broadcaster, indexer, searchService),
+        "javac"
+      )
     }
     debugger =
       context.actorOf(DebugActor.props(broadcaster, searchService), "debugging")
@@ -126,6 +138,7 @@ class Project(
 
   override def postStop(): Unit = {
     // make sure the "reliable" dependencies are cleaned up
+    Try(indexInterruptSignal.set(true).unsafeRun())
     Try(searchService.shutdown().unsafeRun())
     Try(vfs.close())
   }
