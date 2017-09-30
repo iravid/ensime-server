@@ -149,13 +149,19 @@ class SearchService(
     // delete the stale data before adding anything new
     // returns number of rows deleted
     def deleteReferences(
-      checks: List[FileCheck]
+      checks: List[FileCheck],
+      batchSize: Int = 1000
     )(implicit S: Strategy): Task[Int] =
       for {
         _ <- Task.delay(
               log.debug(s"removing ${checks.size} stale files from the index")
             )
-        deleted <- deleteInBatches(checks.map(_.file))
+        deleted <- Stream
+                    .emits(checks)
+                    .map(_.file)
+                    .chunkN(batchSize)
+                    .evalMap(c => delete(c.flatMap(_.toList)))
+                    .runFold(0)(_ + _)
       } yield deleted
 
     // a snapshot of everything that we want to index
@@ -243,12 +249,9 @@ class SearchService(
     }
 
     for {
-      checks <- Task.fromFuture(db.knownFiles())
-      deletes <- Stream
-                  .eval(findStaleFileChecks(checks))
-                  .flatMap(Stream.emits(_).chunkN(serverConfig.indexBatchSize))
-                  .evalMap(chunks => deleteReferences(chunks.flatMap(_.toList)))
-                  .runFold(0)(_ + _)
+      checks             <- Task.fromFuture(db.knownFiles())
+      stale              <- findStaleFileChecks(checks)
+      deletes            <- deleteReferences(stale)
       bases              <- findBases()
       (jars, classFiles) = bases
       added              <- indexBases(jars, classFiles, checks)
@@ -488,13 +491,6 @@ class SearchService(
 
   val backlogActor =
     actorSystem.actorOf(Props(new IndexingQueueActor(this)), "ClassfileIndexer")
-
-  // deletion in both Lucene and H2 is really slow, batching helps
-  def deleteInBatches(
-    files: List[FileObject],
-    batchSize: Int = 1000
-  )(implicit S: Strategy): Task[Int] =
-    Task.traverse(files.grouped(batchSize).toSeq)(delete).map(_.sum)
 
   // returns number of rows removed
   def delete(files: List[FileObject])(implicit S: Strategy): Task[Int] = {
